@@ -1,0 +1,102 @@
+# taar — raw-syscall socket primitives (UDP + TCP).
+#
+# The sovereign transport substrate for the AGNOS network-tools family
+# (yo / dig / whirl). Linux backend = raw POSIX socket syscalls (no lib/net.cyr
+# — the family per-backend posture: thin, no tagged-union wrappers). The AGNOS
+# backend (sovereign sock_*#47-50 / udp_*#51-54) is a follow-up #ifdef; the
+# Linux path is active.
+#
+# Allocator-free: all scratch (sockaddr_in, timeval) lives on function-local
+# stack arrays, so taar carries no `alloc` dep for sockets.
+#
+# IPv4 addresses are packed first-octet-in-high-byte (0xC0A80101 = 192.168.1.1),
+# matching taar's ipv4_parse / ipv4_format_to_buf.
+
+var _TAAR_SYS_READ       = 0;
+var _TAAR_SYS_WRITE      = 1;
+var _TAAR_SYS_CLOSE      = 3;
+var _TAAR_SYS_SOCKET     = 41;
+var _TAAR_SYS_CONNECT    = 42;
+var _TAAR_SYS_SENDTO     = 44;
+var _TAAR_SYS_RECVFROM   = 45;
+var _TAAR_SYS_SETSOCKOPT = 54;
+
+var _TAAR_AF_INET     = 2;
+var _TAAR_SOCK_STREAM = 1;
+var _TAAR_SOCK_DGRAM  = 2;
+var _TAAR_IPPROTO_TCP = 6;
+var _TAAR_IPPROTO_UDP = 17;
+var _TAAR_SOL_SOCKET  = 1;
+var _TAAR_SO_RCVTIMEO = 20;
+
+# Fill a caller-provided 16-byte buffer as a sockaddr_in for `packed_addr`
+# (first-octet-high-byte) + `port` (written network byte order).
+fn taar_fill_sockaddr(sa, packed_addr, port): i64 {
+    var i = 0;
+    while (i < 16) { store8(sa + i, 0); i = i + 1; }
+    store8(sa, _TAAR_AF_INET);            # AF_INET low byte (2); high byte stays 0
+    store8(sa + 2, (port >> 8) & 0xFF);   # port hi (network order)
+    store8(sa + 3, port & 0xFF);          # port lo
+    store8(sa + 4, (packed_addr >> 24) & 0xFF);
+    store8(sa + 5, (packed_addr >> 16) & 0xFF);
+    store8(sa + 6, (packed_addr >> 8)  & 0xFF);
+    store8(sa + 7, packed_addr & 0xFF);
+    return 0;
+}
+
+# --- UDP (DNS) ---
+
+# Open a UDP/IPv4 socket. Returns fd >= 0 or negative errno.
+fn taar_udp_open(): i64 {
+    return syscall(_TAAR_SYS_SOCKET, _TAAR_AF_INET, _TAAR_SOCK_DGRAM, _TAAR_IPPROTO_UDP);
+}
+
+# SO_RCVTIMEO so a blocking recv returns -EAGAIN after timeout_ms.
+fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
+    var tv[16];
+    store64(&tv, timeout_ms / 1000);
+    store64(&tv + 8, (timeout_ms % 1000) * 1000);
+    return syscall(_TAAR_SYS_SETSOCKOPT, fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
+}
+
+# sendto(fd, pkt, pkt_len, 0, sockaddr_in(addr,port), 16). Bytes sent / -errno.
+fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
+    var sa[16];
+    taar_fill_sockaddr(&sa, packed_addr, port);
+    return syscall(_TAAR_SYS_SENDTO, fd, pkt, pkt_len, 0, &sa, 16);
+}
+
+# recvfrom(fd, buf, maxlen, 0, NULL, NULL). Bytes received / -errno (-EAGAIN on timeout).
+fn taar_udp_recv(fd, buf, maxlen): i64 {
+    return syscall(_TAAR_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
+}
+
+# --- TCP ---
+
+# Open a TCP/IPv4 socket. Returns fd >= 0 or negative errno.
+fn taar_tcp_open(): i64 {
+    return syscall(_TAAR_SYS_SOCKET, _TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
+}
+
+# connect(fd, sockaddr_in(addr,port), 16). 0 on success / negative errno.
+fn taar_tcp_connect(fd, packed_addr, port): i64 {
+    var sa[16];
+    taar_fill_sockaddr(&sa, packed_addr, port);
+    return syscall(_TAAR_SYS_CONNECT, fd, &sa, 16);
+}
+
+# write(fd, buf, len) on the connected socket. Bytes sent / -errno.
+fn taar_tcp_send(fd, buf, len): i64 {
+    return syscall(_TAAR_SYS_WRITE, fd, buf, len);
+}
+
+# read(fd, buf, maxlen) on the connected socket. Bytes read (0 = peer closed) / -errno.
+fn taar_tcp_recv(fd, buf, maxlen): i64 {
+    return syscall(_TAAR_SYS_READ, fd, buf, maxlen);
+}
+
+# --- common ---
+
+fn taar_sock_close(fd): i64 {
+    return syscall(_TAAR_SYS_CLOSE, fd);
+}

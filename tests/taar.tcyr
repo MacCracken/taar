@@ -6,6 +6,7 @@
 # for reliable CI. Pure codecs live here.
 
 include "src/ipv4.cyr"
+include "src/socket.cyr"
 
 # === IPv4 parser ===
 fn test_ipv4_parse() {
@@ -48,10 +49,31 @@ fn test_ipv4_format() {
     return 0;
 }
 
+# === socket: sockaddr_in builder (pure; the syscalls smoke against a live host) ===
+fn test_sockaddr() {
+    test_group("sockaddr");
+    var sa = alloc(16);
+    taar_fill_sockaddr(sa, 0xC0A80101, 53);   # 192.168.1.1 : 53
+    assert_eq(load8(sa + 0), 2,   "AF_INET low byte");
+    assert_eq(load8(sa + 1), 0,   "AF_INET high byte");
+    assert_eq(load8(sa + 2), 0,   "port hi (53>>8)");
+    assert_eq(load8(sa + 3), 53,  "port lo");
+    assert_eq(load8(sa + 4), 192, "addr octet 0");
+    assert_eq(load8(sa + 5), 168, "addr octet 1");
+    assert_eq(load8(sa + 6), 1,   "addr octet 2");
+    assert_eq(load8(sa + 7), 1,   "addr octet 3");
+    # a port spanning both bytes: 443 = 0x01BB
+    taar_fill_sockaddr(sa, 0x08080808, 443);
+    assert_eq(load8(sa + 2), 1,   "port hi (443>>8 = 1)");
+    assert_eq(load8(sa + 3), 187, "port lo (443 & 0xFF = 187)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_ipv4_parse();
     test_ipv4_format();
+    test_sockaddr();
     return assert_summary();
 }
 
