@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          # The cyrius.cyml `[package].cyrius` pin is the single source of
+          # truth for the toolchain version — no version is hardcoded in this
+          # YAML. Read the pin and hand it to the upstream installer, which
+          # fetches + lays out $HOME/.cyrius/{bin,lib}. (Hand-rolled curl+cp
+          # fails `cyrius deps` pin-check — install.sh is required.)
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Lint
+        # Hard gate: any `warn` line fails CI (matches patra / sigil / agnosys).
+        run: |
+          fail=0
+          for f in src/*.cyr programs/*.cyr; do
+            out=$(cyrius lint "$f" 2>&1 || true)
+            echo "$out"
+            if echo "$out" | grep -qE '^[[:space:]]*warn '; then
+              echo "lint: warnings in $f"; fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
+      - name: Regenerate dist bundle (cyrius distlib)
+        # taar is a distlib: `cyrius distlib` concatenates [lib].modules
+        # (src/ipv4.cyr today) into dist/taar.cyr. Consumers (yo, dig)
+        # `cyrius deps`-resolve it and `include "lib/taar.cyr"`.
+        run: |
+          cyrius distlib
+          test -s dist/taar.cyr || { echo "dist/taar.cyr missing or empty after distlib"; exit 1; }
+          echo "dist/taar.cyr: $(wc -c < dist/taar.cyr) bytes"
+
+      - name: Check committed bundle freshness (soft)
+        # The committed dist/taar.cyr should match a fresh regeneration —
+        # a stale bundle ships old code to consumers. Soft (warning) so a
+        # benign formatting/toolchain delta doesn't red the build; release
+        # regenerates the bundle authoritatively.
+        run: |
+          if ! git diff --quiet -- dist/taar.cyr; then
+            echo "::warning::dist/taar.cyr differs from a fresh 'cyrius distlib' — run it and commit the regenerated bundle"
+            git --no-pager diff -- dist/taar.cyr || true
+          else
+            echo "committed dist/taar.cyr is up to date"
+          fi
+
+      - name: Build smoke
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/taar-smoke
+          echo "taar-smoke: $(wc -c < build/taar-smoke) bytes"
+
+      - name: Verify ELF
+        run: xxd -l 4 build/taar-smoke | grep -q "7f45 4c46"
+
+      - name: Smoke run
+        # programs/smoke.cyr round-trips a known address through
+        # ipv4_parse -> ipv4_format_to_buf and exits non-zero on mismatch.
+        run: ./build/taar-smoke
+
+      - name: Unit tests
+        run: cyrius test tests/taar.tcyr
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for dangerous patterns
+        run: |
+          WARN=0
+          if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# "; then
+            echo "WARN: raw execve"; WARN=1
+          fi
+          if grep -rn '"/etc/' src/ 2>/dev/null; then
+            echo "WARN: hardcoded /etc paths"; WARN=1
+          fi
+          echo "security scan complete (warnings: $WARN)"
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required docs
+        run: |
+          MISSING=0
+          for doc in README.md CHANGELOG.md VERSION LICENSE cyrius.cyml; do
+            if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
+          done
+          exit $MISSING
+      - name: Verify version consistency
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # ${file:VERSION} template means cyml derives version from the
+          # VERSION file — VERSION is the single source of truth.
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then
+              CYML_VERSION="$FILE_VERSION"
+          else
+              CYML_VERSION="$CYML_RAW"
+          fi
+          [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_RAW)"; exit 1; }
+          grep -q "$FILE_VERSION" CHANGELOG.md || { echo "version not in changelog"; exit 1; }
+          echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW)"

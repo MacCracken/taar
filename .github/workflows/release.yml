@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    name: CI Gate
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build & Release
+    needs: [ci]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # ${file:VERSION} template → VERSION is the single source of truth.
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then
+              CYML_VERSION="$FILE_VERSION"
+          else
+              CYML_VERSION="$CYML_RAW"
+          fi
+          TAG="${GITHUB_REF_NAME}"
+          [ "$FILE_VERSION" = "$TAG" ] || { echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
+          [ "$CYML_VERSION" = "$TAG" ] || { echo "cyrius.cyml ($CYML_RAW) != tag ($TAG)"; exit 1; }
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          # Single source of truth = cyrius.cyml `[package].cyrius` pin.
+          # Upstream installer lays out $HOME/.cyrius/versions/<v>/ (the path
+          # `cyrius deps` pin-checks) — never a hand-rolled curl+cp.
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Regenerate dist bundle (cyrius distlib)
+        run: |
+          cyrius distlib
+          test -s dist/taar.cyr || { echo "dist/taar.cyr missing or empty"; exit 1; }
+          echo "dist/taar.cyr: $(wc -c < dist/taar.cyr) bytes"
+
+      - name: Build smoke (DCE)
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/taar-smoke
+          echo "taar-smoke: $(wc -c < build/taar-smoke) bytes"
+
+      - name: Archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          rm -f taar-*.tar.gz taar-*.cyr
+          git archive --format=tar.gz --prefix="taar-${TAG}/" -o "taar-${TAG}-src.tar.gz" HEAD
+          cp dist/taar.cyr "taar-${TAG}.cyr"
+          sha256sum taar-*.tar.gz taar-*.cyr build/taar-smoke > SHA256SUMS
+
+      - name: Extract changelog
+        run: |
+          awk "/^## \\[${GITHUB_REF_NAME}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: "taar ${{ github.ref_name }}"
+          body_path: /tmp/body.md
+          prerelease: ${{ startsWith(github.ref_name, '0.') }}
+          files: |
+            taar-*.tar.gz
+            taar-*.cyr
+            build/taar-smoke
+            SHA256SUMS
