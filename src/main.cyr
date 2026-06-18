@@ -4,11 +4,14 @@
 # cyrius.cyml directly and bundles them into dist/taar.cyr — this file
 # is NOT part of the dist bundle.
 #
-# Modules by concern (per-protocol, grown as consumers fold in):
-#   ipv4.cyr  — strict dotted-quad parse/format (ipv4_parse / ipv4_format_to_buf)
+# Modules by concern (per-protocol; single-pass order = dependency order):
+#   ipv4.cyr    — strict dotted-quad parse/format (ipv4_parse / ipv4_format_to_buf)
+#   socket.cyr  — raw-syscall UDP + TCP primitives (taar_udp_* / taar_tcp_*)
+#   dns.cyr     — hostname → IPv4 over UDP-53 (taar_resolve_ipv4)
 #
-# Planned (fold in per second-consumer trigger): socket.cyr (UDP/ICMP
-# send/recv shim, linux + agnos backends), icmp.cyr (echo packet +
-# checksum), dns.cyr (query build / response parse / name compression).
+# Planned (fold in per second-consumer trigger): icmp.cyr (echo + checksum),
+# tcp/tls/http (whirl as the third consumer), the agnos socket backend.
 
 include "src/ipv4.cyr"
+include "src/socket.cyr"
+include "src/dns.cyr"

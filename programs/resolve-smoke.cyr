@@ -1,0 +1,22 @@
+# taar resolve smoke — live DNS check. Resolves a hostname via taar_resolve_ipv4
+# (resolv.conf → UDP-53 query → A-record parse) and prints the dotted-quad.
+# Exit 0 + an IP printed = the full sovereign resolve path works on this host.
+#
+#   cyrius build programs/resolve-smoke.cyr build/resolve-smoke
+#   ./build/resolve-smoke            # -> e.g. 93.184.216.34
+
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+    var ip = taar_resolve_ipv4("example.com");
+    if (ip < 0) { return 1; }
+    var b = alloc(16);
+    var n = ipv4_format_to_buf(ip, b);
+    store8(b + n, 10);             # newline
+    syscall(1, 1, b, n + 1);       # write(stdout, ip\n)
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

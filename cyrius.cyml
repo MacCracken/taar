@@ -19,10 +19,10 @@ test = "src/test.cyr"
 # defined in earlier modules. src/main.cyr is the in-tree convenience
 # entry (includes all modules for smoke + tests) and is intentionally
 # NOT listed — it would duplicate the module bodies in the dist bundle.
-modules = ["src/ipv4.cyr"]
+modules = ["src/ipv4.cyr", "src/socket.cyr", "src/dns.cyr"]
 
 [deps]
 # ipv4_format_to_buf calls fmt_int_buf (stdlib fmt). Consumers must
 # carry fmt in their own stdlib deps for the dist bundle to resolve —
 # yo and dig already do.
-stdlib = ["syscalls", "fmt", "assert"]
+stdlib = ["syscalls", "fmt", "assert", "alloc"]

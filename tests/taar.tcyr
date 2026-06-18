@@ -7,6 +7,7 @@
 
 include "src/ipv4.cyr"
 include "src/socket.cyr"
+include "src/dns.cyr"
 
 # === IPv4 parser ===
 fn test_ipv4_parse() {
@@ -69,11 +70,67 @@ fn test_sockaddr() {
     return 0;
 }
 
+# === dns: wire framing (pure; the live resolve is a smoke) ===
+fn test_dns_encode() {
+    test_group("dns-encode");
+    var out = alloc(64);
+    var n = _taar_dns_encode_name("example.com", out);
+    assert_eq(n, 13, "encode len (example.com)");
+    assert_eq(load8(out + 0), 7, "label1 length = 7");
+    assert_eq(load8(out + 1), 101, "label1[0] = 'e'");
+    assert_eq(load8(out + 8), 3, "label2 length = 3");
+    assert_eq(load8(out + 12), 0, "root label terminator");
+}
+
+fn test_dns_build() {
+    test_group("dns-build");
+    var qb = alloc(300);
+    var ql = _taar_dns_build_query(qb, 0xABCD, "a.bc");
+    assert_eq(ql, 22, "query len for a.bc (12 + 6 + 4)");
+    assert_eq(load8(qb + 0), 171, "id hi byte (0xAB)");
+    assert_eq(load8(qb + 1), 205, "id lo byte (0xCD)");
+    assert_eq(load8(qb + 2), 1, "RD flag hi byte (0x01)");
+    assert_eq(load8(qb + 5), 1, "qdcount lo = 1");
+}
+
+# Hand-build a minimal A response (example.com -> 93.184.216.34). Returns length.
+fn _canned_a_response(buf): i64 {
+    _taar_dns_store_u16(buf, 0, 0x1234);   # id
+    _taar_dns_store_u16(buf, 2, 0x8180);   # QR|RD|RA, rcode NOERROR
+    _taar_dns_store_u16(buf, 4, 1);        # qdcount
+    _taar_dns_store_u16(buf, 6, 1);        # ancount
+    _taar_dns_store_u16(buf, 8, 0);
+    _taar_dns_store_u16(buf, 10, 0);
+    var n = _taar_dns_encode_name("example.com", buf + 12);
+    var off = 12 + n;
+    _taar_dns_store_u16(buf, off, 1); off = off + 2;   # qtype A
+    _taar_dns_store_u16(buf, off, 1); off = off + 2;   # qclass IN
+    store8(buf + off, 0xC0); store8(buf + off + 1, 0x0C); off = off + 2;   # answer name ptr -> 12
+    _taar_dns_store_u16(buf, off, 1); off = off + 2;   # type A
+    _taar_dns_store_u16(buf, off, 1); off = off + 2;   # class IN
+    store8(buf + off, 0); store8(buf + off + 1, 0); store8(buf + off + 2, 0x0E); store8(buf + off + 3, 0x10); off = off + 4;   # ttl 3600
+    _taar_dns_store_u16(buf, off, 4); off = off + 2;   # rdlength
+    store8(buf + off, 93); store8(buf + off + 1, 184); store8(buf + off + 2, 216); store8(buf + off + 3, 34); off = off + 4;
+    return off;
+}
+
+fn test_dns_parse_a() {
+    test_group("dns-parse-a");
+    var buf = alloc(128);
+    var len = _canned_a_response(buf);
+    assert_eq(_taar_dns_hdr_ancount(buf), 1, "ancount = 1");
+    assert_eq(_taar_dns_hdr_rcode(buf), 0, "rcode NOERROR");
+    assert_eq(_taar_dns_first_a(buf, len), 0x5DB8D822, "A record 93.184.216.34");
+}
+
 fn main() {
     alloc_init();
     test_ipv4_parse();
     test_ipv4_format();
     test_sockaddr();
+    test_dns_encode();
+    test_dns_build();
+    test_dns_parse_a();
     return assert_summary();
 }
 

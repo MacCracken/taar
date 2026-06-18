@@ -78,6 +78,15 @@ fn taar_tcp_open(): i64 {
     return syscall(_TAAR_SYS_SOCKET, _TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
 }
 
+# SO_RCVTIMEO so a blocking recv returns -EAGAIN after timeout_ms instead of
+# hanging forever (a server that doesn't close the connection, a stall, etc.).
+fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
+    var tv[16];
+    store64(&tv, timeout_ms / 1000);
+    store64(&tv + 8, (timeout_ms % 1000) * 1000);
+    return syscall(_TAAR_SYS_SETSOCKOPT, fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
+}
+
 # connect(fd, sockaddr_in(addr,port), 16). 0 on success / negative errno.
 fn taar_tcp_connect(fd, packed_addr, port): i64 {
     var sa[16];
