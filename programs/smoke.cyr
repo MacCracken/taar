@@ -1,0 +1,24 @@
+# taar smoke test — proves the library compiles end-to-end and the
+# stdlib include chain resolves. CI builds this to confirm no
+# regression in the dist bundle.
+#
+# Build: cyrius build programs/smoke.cyr build/taar-smoke
+# Run:   ./build/taar-smoke   (exit 0 on success)
+
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+    # Round-trip a known address through parse → format.
+    var packed = ipv4_parse("192.168.1.1");
+    if (packed != 0xC0A80101) { println("taar smoke FAIL: parse"); return 1; }
+    var buf = alloc(16);
+    var n = ipv4_format_to_buf(packed, buf);
+    store8(buf + n, 0);
+    if (streq(buf, "192.168.1.1") == 0) { println("taar smoke FAIL: format"); return 1; }
+    println("taar smoke ok");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

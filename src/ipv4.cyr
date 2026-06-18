@@ -1,0 +1,70 @@
+# ipv4.cyr — strict dotted-quad IPv4 address codec (taar substrate).
+#
+# taar's canonical home for IPv4 parse/format. Supersedes the
+# byte-identical in-tree copies that yo (src/ipv4.cyr) and dig
+# (src/ipv4.cyr) carried before the extraction — both fold onto this
+# module via [deps.taar]. The duplication between those two tools was
+# the documented extraction trigger.
+#
+# Single-purpose. Pure code (no syscalls). Mirrors
+# agnos/kernel/core/net.cyr ip4() packing:
+#   (a<<24) | (b<<16) | (c<<8) | d
+# so a parsed address is byte-comparable with kernel-side struct fields
+# and ready directly as the packed-addr argument to the agnos
+# sock_connect / udp_send syscalls. Hostname/DNS resolution is a
+# separate concern (taar/src/dns.cyr, folds in when a consumer needs it).
+#
+# Strict grammar: D '.' D '.' D '.' D '\0'  where D = one to three
+# decimal digits, value in [0, 255]. No empty segments. No leading
+# garbage. No trailing garbage. No spaces.
+
+var IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
+
+# Parse a dotted-quad into a packed u32. Returns the packed address on
+# success, IPV4_PARSE_FAIL on any rejection. Caller checks `result < 0`
+# to detect failure.
+fn ipv4_parse(s): i64 {
+    if (s == 0) { return IPV4_PARSE_FAIL; }
+    var i = 0;
+    var packed = 0;
+    var seg = 0;
+    while (seg < 4) {
+        var oct = 0;
+        var digits = 0;
+        var c = load8(s + i);
+        while (c >= 48) {
+            if (c > 57) { break; }
+            oct = oct * 10 + (c - 48);
+            if (oct > 255) { return IPV4_PARSE_FAIL; }
+            digits = digits + 1;
+            if (digits > 3) { return IPV4_PARSE_FAIL; }
+            i = i + 1;
+            c = load8(s + i);
+        }
+        if (digits == 0) { return IPV4_PARSE_FAIL; }
+        packed = (packed << 8) | oct;
+        if (seg < 3) {
+            if (c != 46) { return IPV4_PARSE_FAIL; }   # '.' = 46
+            i = i + 1;
+        } else {
+            if (c != 0) { return IPV4_PARSE_FAIL; }    # must terminate after 4th octet
+        }
+        seg = seg + 1;
+    }
+    return packed;
+}
+
+# Format a packed v4 as dotted-quad into buf. Buf must hold at least
+# 16 bytes (worst case "255.255.255.255\0" = 16). Returns bytes
+# written (without a trailing NUL).
+fn ipv4_format_to_buf(packed_addr, buf): i64 {
+    var pos = 0;
+    pos = pos + fmt_int_buf((packed_addr >> 24) & 0xFF, buf + pos);
+    store8(buf + pos, 46); pos = pos + 1;
+    pos = pos + fmt_int_buf((packed_addr >> 16) & 0xFF, buf + pos);
+    store8(buf + pos, 46); pos = pos + 1;
+    pos = pos + fmt_int_buf((packed_addr >> 8)  & 0xFF, buf + pos);
+    store8(buf + pos, 46); pos = pos + 1;
+    pos = pos + fmt_int_buf(packed_addr & 0xFF, buf + pos);
+    return pos;
+}

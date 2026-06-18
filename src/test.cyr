@@ -1,0 +1,11 @@
+# taar — top-level test entry (referenced by cyrius.cyml [build].test).
+# For unit tests, add cases to tests/taar.tcyr.
+
+include "lib/syscalls.cyr"
+
+fn main() {
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

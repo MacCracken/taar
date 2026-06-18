@@ -1,0 +1,59 @@
+# taar test suite — pure-code coverage of the substrate surface.
+#
+# Stdlib auto-included via cyrius.cyml. Network paths (UDP/ICMP
+# send/recv) are exercised by the real consumer binaries (yo, dig)
+# rather than this suite — too much variance vs. a live host to make
+# for reliable CI. Pure codecs live here.
+
+include "src/ipv4.cyr"
+
+# === IPv4 parser ===
+fn test_ipv4_parse() {
+    test_group("ipv4_parse");
+    # Valid.
+    assert_eq(ipv4_parse("0.0.0.0"),         0x00000000, "ipv4 zeros");
+    assert_eq(ipv4_parse("127.0.0.1"),       0x7F000001, "ipv4 loopback");
+    assert_eq(ipv4_parse("8.8.8.8"),         0x08080808, "ipv4 google");
+    assert_eq(ipv4_parse("192.168.1.1"),     0xC0A80101, "ipv4 gateway");
+    assert_eq(ipv4_parse("255.255.255.255"), 0xFFFFFFFF, "ipv4 broadcast");
+    assert_eq(ipv4_parse("10.0.2.15"),       0x0A00020F, "ipv4 slirp guest");
+    # Rejection cases.
+    assert_eq(ipv4_parse("256.0.0.0"),  IPV4_PARSE_FAIL, "ipv4 octet > 255");
+    assert_eq(ipv4_parse("1.2.3"),      IPV4_PARSE_FAIL, "ipv4 only 3 octets");
+    assert_eq(ipv4_parse("1.2.3.4.5"),  IPV4_PARSE_FAIL, "ipv4 5 octets");
+    assert_eq(ipv4_parse("1.2..4"),     IPV4_PARSE_FAIL, "ipv4 empty segment");
+    assert_eq(ipv4_parse(""),           IPV4_PARSE_FAIL, "ipv4 empty string");
+    assert_eq(ipv4_parse("1.2.3.4 "),   IPV4_PARSE_FAIL, "ipv4 trailing space");
+    assert_eq(ipv4_parse("1234.0.0.0"), IPV4_PARSE_FAIL, "ipv4 4-digit octet");
+    return 0;
+}
+
+# === IPv4 format — round-trip ===
+fn test_ipv4_format() {
+    test_group("ipv4_format");
+    var b = alloc(16);
+    var n = ipv4_format_to_buf(0x7F000001, b);
+    store8(b + n, 0);
+    assert_eq(streq(b, "127.0.0.1"), 1, "ipv4 format loopback");
+    n = ipv4_format_to_buf(0xFFFFFFFF, b);
+    store8(b + n, 0);
+    assert_eq(streq(b, "255.255.255.255"), 1, "ipv4 format broadcast");
+    n = ipv4_format_to_buf(0xC0A80101, b);
+    store8(b + n, 0);
+    assert_eq(streq(b, "192.168.1.1"), 1, "ipv4 format gateway");
+    # Round-trip: parse(format(x)) == x.
+    n = ipv4_format_to_buf(0x08080808, b);
+    store8(b + n, 0);
+    assert_eq(ipv4_parse(b), 0x08080808, "ipv4 round-trip 8.8.8.8");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_ipv4_parse();
+    test_ipv4_format();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,28 @@
+[package]
+name = "taar"
+version = "${file:VERSION}"
+description = "तार — wire / string / connection. Network-probe substrate library for AGNOS first-party net tools (yo, dig, whirl): IPv4 address codec today; ICMP / UDP socket primitives + DNS query/response as consumers fold in. Sanskrit/Hindi system-lib naming lane."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/taar"
+language = "cyrius"
+cyrius = "6.2.6"
+
+[build]
+entry = "programs/smoke.cyr"
+output = "build/taar-smoke"
+test = "src/test.cyr"
+
+[lib]
+# `cyrius distlib` concatenates these (in order) into dist/taar.cyr;
+# consumers `include "lib/taar.cyr"` after `cyrius deps` resolves the
+# dep. Single-pass compiler: each module may only reference symbols
+# defined in earlier modules. src/main.cyr is the in-tree convenience
+# entry (includes all modules for smoke + tests) and is intentionally
+# NOT listed — it would duplicate the module bodies in the dist bundle.
+modules = ["src/ipv4.cyr"]
+
+[deps]
+# ipv4_format_to_buf calls fmt_int_buf (stdlib fmt). Consumers must
+# carry fmt in their own stdlib deps for the dist bundle to resolve —
+# yo and dig already do.
+stdlib = ["syscalls", "fmt", "assert"]

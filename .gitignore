@@ -1,0 +1,19 @@
+/build/
+*.core
+
+# `lib/` is populated by `cyrius deps` / `cyrius update` from cyrius.cyml
+# [deps] — a build artifact, not source. cyrius.lock pins what was
+# resolved. Never commit; mirrors the sit/darshana convention.
+/lib/
+/cyrius.lock
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.env.*
+*.pem
+*.key

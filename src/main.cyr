@@ -1,0 +1,14 @@
+# taar — library entry. Re-exports every [lib] module so consumers
+# (programs/smoke.cyr, tests/taar.tcyr) can pull the whole API surface
+# via a single include. `cyrius distlib` reads [lib].modules from
+# cyrius.cyml directly and bundles them into dist/taar.cyr — this file
+# is NOT part of the dist bundle.
+#
+# Modules by concern (per-protocol, grown as consumers fold in):
+#   ipv4.cyr  — strict dotted-quad parse/format (ipv4_parse / ipv4_format_to_buf)
+#
+# Planned (fold in per second-consumer trigger): socket.cyr (UDP/ICMP
+# send/recv shim, linux + agnos backends), icmp.cyr (echo packet +
+# checksum), dns.cyr (query build / response parse / name compression).
+
+include "src/ipv4.cyr"
