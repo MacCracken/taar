@@ -83,8 +83,8 @@ fn ipv4_format_to_buf(packed_addr, buf): i64 {
 # The sovereign transport substrate for the AGNOS network-tools family
 # (yo / dig / whirl). Linux backend = raw POSIX socket syscalls (no lib/net.cyr
 # — the family per-backend posture: thin, no tagged-union wrappers). The AGNOS
-# backend (sovereign sock_*#47-50 / udp_*#51-54) is a follow-up #ifdef; the
-# Linux path is active.
+# backend (sovereign sock_*#47-50 / udp_*#51-54) is a follow-up tracked in CHANGELOG [0.2.0];
+# the Linux #ifdef path is active.
 #
 # Allocator-free: all scratch (sockaddr_in, timeval) lives on function-local
 # stack arrays, so taar carries no `alloc` dep for sockets.
@@ -369,7 +369,11 @@ fn _taar_dns_first_a(msg, msg_len): i64 {
         if (rdata + rdlen > msg_len) { return 0 - 1; }
         if (rtype == _TAAR_DNS_TYPE_A) {
             if (rdlen == 4) {
-                return (load8(msg + rdata) << 24) | (load8(msg + rdata + 1) << 16) | (load8(msg + rdata + 2) << 8) | load8(msg + rdata + 3);
+                var o0 = load8(msg + rdata);
+                var o1 = load8(msg + rdata + 1);
+                var o2 = load8(msg + rdata + 2);
+                var o3 = load8(msg + rdata + 3);
+                return (o0 << 24) | (o1 << 16) | (o2 << 8) | o3;
             }
         }
         off = rdata + rdlen;

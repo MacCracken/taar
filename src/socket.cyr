@@ -3,8 +3,8 @@
 # The sovereign transport substrate for the AGNOS network-tools family
 # (yo / dig / whirl). Linux backend = raw POSIX socket syscalls (no lib/net.cyr
 # — the family per-backend posture: thin, no tagged-union wrappers). The AGNOS
-# backend (sovereign sock_*#47-50 / udp_*#51-54) is a follow-up #ifdef; the
-# Linux path is active.
+# backend (sovereign sock_*#47-50 / udp_*#51-54) is a follow-up tracked in CHANGELOG [0.2.0];
+# the Linux #ifdef path is active.
 #
 # Allocator-free: all scratch (sockaddr_in, timeval) lives on function-local
 # stack arrays, so taar carries no `alloc` dep for sockets.

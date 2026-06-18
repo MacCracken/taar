@@ -175,7 +175,11 @@ fn _taar_dns_first_a(msg, msg_len): i64 {
         if (rdata + rdlen > msg_len) { return 0 - 1; }
         if (rtype == _TAAR_DNS_TYPE_A) {
             if (rdlen == 4) {
-                return (load8(msg + rdata) << 24) | (load8(msg + rdata + 1) << 16) | (load8(msg + rdata + 2) << 8) | load8(msg + rdata + 3);
+                var o0 = load8(msg + rdata);
+                var o1 = load8(msg + rdata + 1);
+                var o2 = load8(msg + rdata + 2);
+                var o3 = load8(msg + rdata + 3);
+                return (o0 << 24) | (o1 << 16) | (o2 << 8) | o3;
             }
         }
         off = rdata + rdlen;
