@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-18 — AGNOS sovereign backend
+
+The socket substrate gains its **AGNOS backend**, selected at compile time by the
+cyrius emit target (`CYRIUS_TARGET_AGNOS=1`). The `taar_*` API is identical across
+both targets — consumers (`whirl`'s transport, `taar`'s own DNS) never branch.
+
+### Added
+- **`src/socket.cyr` AGNOS backend** (`#ifdef CYRIUS_TARGET_AGNOS`) — sovereign
+  ring-3 syscalls via cyrius's agnos syscall lib, mirroring `dig`'s `platform_agnos.cyr`:
+  - **TCP** over `sock_connect`#47 / `sock_send`#48 / `sock_recv`#49 / `sock_close`#50.
+    AGNOS has no `socket()`+`connect()` split, so `taar_tcp_open` resets the conn
+    slot and `taar_tcp_connect` does the real `sock_connect` (ephemeral src port from
+    `getrandom`#45), stashing the conn_id (single active conn; taar is single-threaded).
+    `sock_recv`#49 is non-blocking (`>0` / `0`=WOULD_BLOCK / `-1`=EOF) — `taar_tcp_recv`
+    polls it against an `uptime_ms`#40 deadline and maps the result back to the Linux
+    blocking-read sense (`>0` data, `0`=closed) callers expect.
+  - **UDP** over `udp_bind`#51 / `udp_send`#52 / `udp_recv`#53 / `udp_unbind`#54
+    (ephemeral source port; packed `(sport<<16)|dport`; deadline-polled recv).
+  - **Platform helpers** `_taar_plat_random_u16` (`getrandom`#45) + `_taar_plat_read_file`
+    (`sys_open`/`read`/`close`) — relocated here from `dns.cyr` so DNS stays
+    platform-neutral RFC-1035 framing.
+- **`taar_udp_close`** — splits UDP teardown (`udp_unbind`#54 on AGNOS) from
+  `taar_sock_close` (TCP `sock_close`#50). On Linux both remain `close(2)`. `dns.cyr`
+  now closes its UDP listener via `taar_udp_close`.
+
+### Changed
+- `src/socket.cyr` Linux backend wrapped in `#ifndef CYRIUS_TARGET_AGNOS`; the
+  entropy/file helpers `_taar_dns_random_u16` / `_taar_dns_read_file` removed from
+  `dns.cyr` (folded into the platform helpers).
+- `dist/taar.cyr` regenerated (643 lines) — the `#ifdef` blocks survive the bundle
+  concatenation and resolve at the **consumer's** compile target.
+
+### Verified
+- Linux: build + smoke + **40** unit assertions green (unchanged).
+- AGNOS: `CYRIUS_TARGET_AGNOS=1 cyrius build src/main.cyr` compiles the sovereign
+  backend — `sys_sock_*` / `sys_udp_*` / `sys_getrandom` / `sys_uptime_ms` /
+  `sys_sleep_ms` resolve from the agnos syscall lib (same path `dig` proved).
+
 ## [0.2.0] — 2026-06-18 — socket + dns (whirl extraction)
 
 `whirl` (the third network-tools consumer) drove the next two substrate modules.

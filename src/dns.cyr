@@ -18,31 +18,11 @@ var _TAAR_DNS_MAX_NAME      = 255;
 var _TAAR_DNS_MAX_HOPS      = 32;
 var _TAAR_DNS_RCODE_NOERROR = 0;
 
-var _TAAR_DNS_SYS_READ  = 0;
-var _TAAR_DNS_SYS_OPEN  = 2;
-var _TAAR_DNS_SYS_CLOSE = 3;
-var _TAAR_DNS_O_RDONLY  = 0;
-
 var _TAAR_RESOLV_FALLBACK = 0x08080808;   # 8.8.8.8
 
-# --- entropy + file (raw Linux syscalls) ---
-
-fn _taar_dns_random_u16(): i64 {
-    var b[2];
-    var fd = syscall(_TAAR_DNS_SYS_OPEN, "/dev/urandom", _TAAR_DNS_O_RDONLY, 0);
-    if (fd < 0) { return 0x1234; }
-    syscall(_TAAR_DNS_SYS_READ, fd, &b, 2);
-    syscall(_TAAR_DNS_SYS_CLOSE, fd);
-    return (load8(&b) << 8) | load8(&b + 1);
-}
-
-fn _taar_dns_read_file(path, buf, maxlen): i64 {
-    var fd = syscall(_TAAR_DNS_SYS_OPEN, path, _TAAR_DNS_O_RDONLY, 0);
-    if (fd < 0) { return fd; }
-    var n = syscall(_TAAR_DNS_SYS_READ, fd, buf, maxlen);
-    syscall(_TAAR_DNS_SYS_CLOSE, fd);
-    return n;
-}
+# Entropy + file reads come from socket.cyr's platform helpers
+# (_taar_plat_random_u16 / _taar_plat_read_file) so this module stays
+# platform-neutral RFC-1035 framing across the Linux / AGNOS backends.
 
 # --- wire framing (RFC 1035) ---
 
@@ -268,7 +248,7 @@ fn _taar_resolv_parse(buf, len): i64 {
 # /etc/resolv.conf → first nameserver, else 8.8.8.8.
 fn _taar_resolv_discover(): i64 {
     var buf = alloc(4096);
-    var n = _taar_dns_read_file("/etc/resolv.conf", buf, 4096);
+    var n = _taar_plat_read_file("/etc/resolv.conf", buf, 4096);
     if (n > 0) {
         var addr = _taar_resolv_parse(buf, n);
         if (addr > 0) { return addr; }
@@ -286,7 +266,7 @@ fn taar_resolve_ipv4(host): i64 {
     if (lit >= 0) { return lit; }
 
     var ns = _taar_resolv_discover();
-    var id = _taar_dns_random_u16();
+    var id = _taar_plat_random_u16();
 
     var qbuf = alloc(300);
     var qlen = _taar_dns_build_query(qbuf, id, host);
@@ -297,11 +277,11 @@ fn taar_resolve_ipv4(host): i64 {
     taar_udp_set_timeout_ms(fd, 5000);
 
     var sent = taar_udp_send(fd, ns, 53, qbuf, qlen);
-    if (sent < 0) { taar_sock_close(fd); return 0 - 1; }
+    if (sent < 0) { taar_udp_close(fd); return 0 - 1; }
 
     var rbuf = alloc(2048);
     var rn = taar_udp_recv(fd, rbuf, 2048);
-    taar_sock_close(fd);
+    taar_udp_close(fd);
     if (rn < _TAAR_DNS_HEADER_LEN) { return 0 - 1; }
     if (_taar_dns_hdr_id(rbuf) != id) { return 0 - 1; }
     if (_taar_dns_hdr_rcode(rbuf) != _TAAR_DNS_RCODE_NOERROR) { return 0 - 1; }
