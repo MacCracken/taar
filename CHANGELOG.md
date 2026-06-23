@@ -4,6 +4,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-23
+
+### Added
+- **AGNOS resolver discovery prefers the kernel-leased DNS server.** On agnos,
+  `_taar_resolv_discover` (`src/dns.cyr`) now calls the new **`net_config(3)`#61**
+  syscall first via `_taar_plat_dns_server` (`src/socket.cyr`) — the DHCP option-6
+  on-subnet resolver — and uses it when `> 0`, before `/etc/resolv.conf` and the
+  `8.8.8.8` fallback. The off-subnet fallback needs working gateway routing the kernel
+  can't guarantee on real iron (it froze `whirl https://google.com` on archaemenid);
+  the leased resolver is on-subnet + directly ARP-reachable. The Linux backend's
+  `_taar_plat_dns_server` returns `0`, so the `/etc/resolv.conf` path is unchanged
+  there. Interim raw `syscall(61, 3)` (a cyrius `sys_net_config` wrapper is requested,
+  agnos `2026-06-23-agnos-net-config-syscall-wrapper`). **Requires agnos ≥ 1.45.16.**
+
 ## [0.3.0] — 2026-06-18 — AGNOS sovereign backend
 
 The socket substrate gains its **AGNOS backend**, selected at compile time by the

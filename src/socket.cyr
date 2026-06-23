@@ -139,6 +139,10 @@ fn _taar_plat_read_file(path, buf, maxlen): i64 {
     syscall(_TAAR_SYS_CLOSE, fd);
     return n;
 }
+
+# Linux has no kernel-provided resolver to query — DNS discovery uses
+# /etc/resolv.conf. Return 0 so _taar_resolv_discover falls through to the file.
+fn _taar_plat_dns_server(): i64 { return 0; }
 #endif
 
 #ifdef CYRIUS_TARGET_AGNOS
@@ -280,4 +284,14 @@ fn _taar_plat_read_file(path, buf, maxlen): i64 {
     sys_close(fd);
     return n;
 }
+
+# AGNOS net_config(field=3) → the DHCP-leased DNS resolver (option 6, else the
+# leased gateway), packed first-octet-high-byte; 0 if unconfigured / -1 on an
+# unknown field. Preferred over /etc/resolv.conf (typically absent on agnos) and
+# over the off-subnet public fallback (8.8.8.8): the leased resolver is on-subnet,
+# so it routes without depending on gateway-MAC egress. Raw syscall #61 by design —
+# cyrius >= the release that ships `sys_net_config` will let this drop to the wrapper
+# (see the cyrius issue 2026-06-23-agnos-net-config-syscall-wrapper). a2..a4 unused.
+var _TAAR_AG_SYS_NET_CONFIG = 61;
+fn _taar_plat_dns_server(): i64 { return syscall(_TAAR_AG_SYS_NET_CONFIG, 3); }
 #endif

@@ -245,8 +245,15 @@ fn _taar_resolv_parse(buf, len): i64 {
     return 0;
 }
 
-# /etc/resolv.conf → first nameserver, else 8.8.8.8.
+# Kernel-leased resolver (AGNOS net_config#61) → /etc/resolv.conf → 8.8.8.8.
+# On agnos the kernel learns the on-subnet DNS server from the DHCP lease;
+# preferring it avoids the off-subnet 8.8.8.8 fallback, which needs working
+# gateway routing the kernel can't guarantee on real iron (the QEMU-passed /
+# iron-failed gap). _taar_plat_dns_server() returns 0 on Linux, so the
+# resolv.conf path is unchanged there.
 fn _taar_resolv_discover(): i64 {
+    var ksrv = _taar_plat_dns_server();
+    if (ksrv > 0) { return ksrv; }
     var buf = alloc(4096);
     var n = _taar_plat_read_file("/etc/resolv.conf", buf, 4096);
     if (n > 0) {
