@@ -4,6 +4,58 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+Sweep of every doc against the actual tree, and a split of what each file is
+for. Corrections, not rewording — each of these was stated and wrong:
+
+- **README claimed TCP was planned.** The module table carried a combined
+  `tcp`/`tls`/`http` "planned" row, but `taar_tcp_*` shipped in 0.2.0 and
+  `whirl`'s HTTP transport has been running on it since. Split so `socket`
+  reads "UDP **and TCP**" and only `tls`/`http` remain planned.
+- **README and state.md both claimed `dns` carries an AGNOS backend.**
+  "Both socket/dns backends ship behind `#ifdef`" — `src/dns.cyr` has zero
+  `CYRIUS_TARGET_AGNOS` references. `src/socket.cyr` is the only module with
+  per-target arms; `dns` is platform-neutral framing that reaches the kernel
+  only through `socket`'s helpers.
+- **README overstated the bundle's dependencies.** It named all four
+  `[deps] stdlib` leaves as required. The shipped bundle references only
+  `syscalls` and `fmt` — `assert` (and `alloc`, which it pulls in
+  transitively) exist for taar's own test suite. `dist/taar.deps` echoes the
+  full list and so over-declares; that is now stated rather than repeated as
+  fact.
+- **state.md contradicted itself on consumer status.** Its Consumers table
+  said `yo` was "pending — folds `ipv4`" while its own carry-forward said `yo`
+  had already dropped its in-tree `ipv4.cyr`. The latter is correct. Same for
+  `icmp`: the table said "folds when `yo` migrates" (which has happened) while
+  the carry-forward correctly noted it waits on a *second* ICMP consumer.
+- **roadmap.md listed 0.5.0 above 0.4.0** in its Shipped section.
+
+### Changed
+- **`roadmap.md` is forward-looking only.** Its Shipped section duplicated
+  `CHANGELOG.md` and had already drifted out of order — removed. Consumer
+  migration now lists only what remains rather than restating finished work.
+- **`state.md` is a snapshot again.** It had accumulated four releases of
+  history, which is `CHANGELOG.md`'s job. One current-version block now; the
+  Verification section says plainly what is gated and what is not.
+- **Durable conventions moved to `CLAUDE.md`** from state.md — the
+  no-syscall-literals rule and the timeout-is-never-zero contract are process,
+  not state. `CLAUDE.md` gains a "Documentation split" section naming what each
+  of the four docs is for, so this drift is less likely to recur, and its work
+  loop now matches the real gates (it still said `cyrius test`, and predated
+  the aarch64, AGNOS, doc and integration checks).
+- **Bundle line counts now name their source.** state.md quoted `cyrius
+  distlib`'s count in some places and `wc -l` in others — 966 and 979 are the
+  same bundle, differing by the 13-line generated header.
+
+### Added
+- **CI builds the AGNOS target.** Found by the sweep: nothing in CI compiled
+  the `#ifdef CYRIUS_TARGET_AGNOS` arm, so a break there would have landed
+  silently despite the backend being a headline feature. The `build` job now
+  compiles it and asserts the image differs from the Linux build, proving the
+  arm is actually selected. It still only *compiles* — see the roadmap.
+- README gains a **Targets** table (built vs. tests-executed per target, making
+  the AGNOS gap visible) and a **Documentation** index.
+
 ## [0.5.0] — 2026-08-26 — recv-contract parity; docs + integration gated in CI
 
 Closes the last taar-side roadmap item and the oldest carry-forward. The two

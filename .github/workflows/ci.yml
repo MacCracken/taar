@@ -93,6 +93,21 @@ jobs:
           CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/taar-smoke
           echo "taar-smoke: $(wc -c < build/taar-smoke) bytes"
 
+      - name: Build AGNOS target
+        # taar ships an AGNOS backend as a headline feature, but nothing here
+        # compiled it until 0.5.0 — a break in the #ifdef arm would have landed
+        # silently. This only proves the arm COMPILES and is actually selected
+        # (its image must differ from the Linux one); nothing executes it. See
+        # docs/development/roadmap.md, "Executed coverage for the AGNOS backend".
+        run: |
+          CYRIUS_TARGET_AGNOS=1 cyrius build --agnos src/main.cyr build/taar-agnos
+          cyrius build src/main.cyr build/taar-linux-ref
+          if cmp -s build/taar-agnos build/taar-linux-ref; then
+            echo "AGNOS image is identical to the Linux build — the #ifdef arm was not taken"
+            exit 1
+          fi
+          echo "AGNOS arm compiled and selected"
+
       - name: Verify ELF
         run: xxd -l 4 build/taar-smoke | grep -q "7f45 4c46"
 
