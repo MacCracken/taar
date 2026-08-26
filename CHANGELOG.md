@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-26 — toolchain + stdlib refresh
+
+Maintenance cut: no `src/` changes. The cyrius pin and the vendored stdlib
+snapshot both move up to current, and `cyrius distlib` gains a dep sidecar.
+
+### Changed
+- **Cyrius pin `6.2.6` → `6.5.35`** (`cyrius.cyml [package].cyrius`). The pin is
+  the single source of truth both CI workflows read to install the toolchain, so
+  this is the only place the version appears. Clears the `toolchain drift`
+  warning cycc emitted on every build.
+- **Vendored stdlib re-resolved from the 6.5.35 snapshot** — all 16 `lib/*.cyr`
+  files changed (`lib/` is a `cyrius deps` build artifact, gitignored, not
+  source). Largest deltas are the syscall tables: `syscalls_x86_64_agnos.cyr`
+  23,656 → 79,649 bytes, `syscalls_windows.cyr` 6,261 → 18,078,
+  `syscalls_aarch64_linux.cyr` 20,115 → 31,870; also `alloc.cyr` 26,485 → 42,247
+  and `fmt.cyr` 7,878 → 12,844. No taar source change was needed to absorb them.
+- `dist/taar.cyr` regenerated at 0.3.2 — bundle body is **byte-identical** to
+  0.3.1 apart from the version header, confirming the stdlib bump is
+  source-transparent to consumers.
+
+### Added
+- **`dist/taar.deps`** — dep sidecar now emitted by `cyrius distlib` (6.5.35),
+  listing the four stdlib leaves the bundle needs in scope (`syscalls`, `fmt`,
+  `assert`, `alloc`) for a consumer's `cyrius deps` to pick up. Matches
+  `[deps] stdlib` exactly. Ships alongside `dist/taar.cyr`.
+
+### Verified
+- Linux: `cyrius build programs/smoke.cyr` + smoke run green; **40** unit
+  assertions / 0 failed (unchanged); `programs/resolve-smoke.cyr` resolved a
+  live domain over UDP-53.
+- AGNOS: `CYRIUS_TARGET_AGNOS=1 cyrius build --agnos src/main.cyr` compiles the
+  sovereign backend; the emitted image differs from the Linux build, confirming
+  the `#ifdef` branch is taken.
+- `cyrius audit` — fmt clean, lint clean, tests green. `cyrius distlib --check`
+  reports the committed bundle current.
+
+### Notes
+- The pre-existing `undefined function 'vec_get'` warning is unchanged: it comes
+  from a `vec`-args variadic path in `lib/fmt.cyr` that taar never calls (taar
+  uses `fmt_int_buf` only), and it is dead-code-eliminated. Adding `vec` to
+  `[deps] stdlib` would push a dep onto consumers that don't carry it.
+
 ## [0.3.1] — 2026-06-23
 
 ### Added

@@ -8,25 +8,35 @@
 - **0.1.0** — extraction cut: `ipv4` codec module (`ipv4_parse` +
   `ipv4_format_to_buf`), distlib + smoke + 17-assertion test suite, repo
   scaffold.
+- **0.2.0** — `socket` (Linux raw-syscall UDP + TCP) and `dns`
+  (`taar_resolve_ipv4`: resolv.conf discovery + RFC 1035 A-record
+  query/parse over UDP-53), driven by `whirl` as the third consumer.
+  `programs/resolve-smoke.cyr`; suite to 40 assertions.
+- **0.3.0** — the AGNOS socket backend behind `#ifdef CYRIUS_TARGET_AGNOS`:
+  TCP over `sock_*`#47-50, UDP over `udp_*`#51-54, plus the
+  `_taar_plat_*` entropy/file helpers. Identical `taar_*` API across targets.
+- **0.3.1** — AGNOS resolver discovery prefers the kernel-leased DNS server
+  via `net_config`#61 (on-subnet, ARP-reachable) ahead of `/etc/resolv.conf`.
+- **0.3.2** — toolchain + stdlib refresh: cyrius pin `6.2.6` → `6.5.35`, all
+  vendored `lib/*.cyr` re-resolved, `dist/taar.deps` sidecar. No `src/` change.
 
 ## Next (per second-consumer / duplication trigger)
 
-- **`socket` module** — the UDP/ICMP send/recv shim yo + dig duplicate in
-  `platform_linux.cyr` / `platform_agnos.cyr`. Linux backend (raw sockets) +
-  AGNOS backend (`udp_bind`/`send`/`recv`/`unbind` #51-54, `icmp_echo` #55)
-  behind `#ifdef CYRIUS_TARGET_AGNOS`. This is the next honest fold — both
-  consumers already carry near-identical platform shims.
-- **`icmp` module** — echo packet construction + checksum (from yo).
-- **`dns` module** — query build / response parse / name-compression decode
-  (the shared core of yo's and dig's `dns.cyr`; the two diverge at the
-  presentation layer, so extract the codec core, leave per-tool formatting).
+- **`icmp` module** — echo packet construction + checksum (from `yo`). Folds
+  when `yo` migrates; the AGNOS side is `icmp_echo`#55.
+- **`tls` / `http` submodules** — as `whirl` forces them (HTTPS today stops
+  at the TCP layer taar provides).
+- **`sys_net_config` wrapper** — replace the interim raw `syscall(61, 3)` in
+  `src/socket.cyr` once cyrius ships the typed wrapper (requested as agnos
+  `2026-06-23-agnos-net-config-syscall-wrapper`).
 
 ## Consumer migration
 
-- dig → `[deps.taar]`, drop in-tree `ipv4.cyr` (patch cut), verify host + `--agnos`.
-- yo → same.
-- `whirl` (curl/wget) arrives as the third consumer; adds `tcp` / `tls` /
-  `http` submodules onto the already-modular taar.
+- `whirl` → **done** (0.2.0): HTTP transport on `taar_tcp_*` +
+  `taar_resolve_ipv4`.
+- `dig` → `[deps.taar]`, drop in-tree `ipv4.cyr` and dedup its
+  `dns.cyr`/`resolv.cyr` onto `taar.dns`/`taar.socket`; verify host + `--agnos`.
+- `yo` → `[deps.taar]`, drop in-tree `ipv4.cyr`; drives the `icmp` fold.
 
 ## v1.0 criteria (not yet scheduled)
 
