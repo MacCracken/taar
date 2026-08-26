@@ -48,6 +48,23 @@ jobs:
           done
           [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
 
+      - name: Doc coverage
+        # Every public fn in src/ and programs/ carries a doc comment as of
+        # 0.5.0 — the same scope `cyrius audit` reports on. Gate it so
+        # that does not quietly rot — `cyrius audit` reports the count but does
+        # not fail on it.
+        run: |
+          fail=0
+          for f in src/*.cyr programs/*.cyr; do
+            out=$(cyrius doc --check "$f" 2>&1 || true)
+            echo "$f: $(echo "$out" | tail -1)"
+            if echo "$out" | grep -q 'undocumented: '; then
+              echo "$out" | grep 'undocumented: '
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "doc: undocumented public fns"; exit 1; }
+
       - name: Regenerate dist bundle (cyrius distlib)
         # taar is a distlib: `cyrius distlib` concatenates [lib].modules
         # (src/ipv4.cyr today) into dist/taar.cyr. Consumers (yo, dig)
@@ -118,6 +135,53 @@ jobs:
           cyrius build --aarch64 programs/smoke.cyr build/taar-smoke-a64
           qemu-aarch64 build/taar-smoke-a64
           cyrius tests --aarch64 tests/
+
+  integration:
+    name: DNS TC-fallback (integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Probe for unprivileged user+net namespaces
+        id: probe
+        # The harness binds 127.0.0.53:53, which needs CAP_NET_BIND_SERVICE and
+        # a port the host resolver is not already holding. `unshare -rn` gives
+        # both without root. If a runner forbids it the cases cannot run, so
+        # warn loudly rather than failing the build on a sandbox policy.
+        run: |
+          if unshare -rn true 2>/dev/null; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "::warning::unshare -rn not permitted here — TC-fallback cases skipped"
+          fi
+
+      - name: Resolve deps
+        if: steps.probe.outputs.ok == '1'
+        run: cyrius deps
+
+      - name: Build resolve-smoke
+        if: steps.probe.outputs.ok == '1'
+        run: |
+          mkdir -p build
+          cyrius build programs/resolve-smoke.cyr build/taar-resolve
+
+      - name: TC-fallback cases
+        # Covers what no unit test can: taar_resolve_ipv4 retrying over TCP-53
+        # when a reply sets TC, falling back when the retry fails, and refusing
+        # a TCP peer that lies about its framed length. That last case is a real
+        # stack-overflow guard — without it the client writes 60000 bytes into
+        # a 2KB stack buffer and dies.
+        if: steps.probe.outputs.ok == '1'
+        run: tests/integration/tc_fallback.sh
 
   security:
     name: Security Scan

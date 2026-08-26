@@ -4,6 +4,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-26 — recv-contract parity; docs + integration gated in CI
+
+Closes the last taar-side roadmap item and the oldest carry-forward. The two
+remaining module items (`icmp`, `tls`/`http`) stay parked — both wait on a
+consumer forcing the duplication, and per CLAUDE.md are not pre-built.
+
+### Changed
+- **AGNOS `taar_tcp_recv` no longer reports a timeout as a clean close.** A
+  deadline expiry now returns `_TAAR_ERR_TIMEOUT`; `0` keeps its one meaning,
+  "the peer closed". Until now both were `0`, so a peer that stalled mid-body
+  made a truncated read look like a finished response and the caller had no way
+  to tell.
+
+  This sat as a carry-forward on the belief it would break `whirl`. Reading the
+  actual call sites settled that it does not:
+  - `whirl`'s transport loops on `if (n <= 0) { go = 0; }` — a negative stops
+    the loop exactly as `0` did.
+  - `whirl` also installs `taar_tcp_recv` as a cyrius `tls_native` transport
+    callback, whose documented contract is "bytes (>0), or **<=0** on
+    EOF/error (sys_read sense)" — a negative is squarely inside it.
+  - taar's own `_taar_dns_tcp_read_all` uses `if (n <= 0) { return off; }`.
+
+  So no known consumer changes behaviour. It is a minor bump because the
+  documented return value changed, not because anything is expected to break.
+  Two things made the old behaviour the odd one out rather than a design
+  choice: the **Linux** arm already separated the cases (a `SO_RCVTIMEO` expiry
+  is `-EAGAIN` from `read(2)`, a close is `0`), and this same file's
+  `taar_udp_recv` already returned `-11` on timeout. AGNOS TCP was the only
+  place the two collapsed, against a module contract promising an identical
+  surface on both targets.
+- **`_TAAR_ERR_TIMEOUT`** replaces the bare `-11` literal in both AGNOS poll
+  loops. It is `-EAGAIN` — the value the kernel itself yields on a `SO_RCVTIMEO`
+  expiry — so callers need one check, not one per backend.
+
+### Added
+- **Doc comments on every public fn.** `cyrius audit` reported 15 undocumented
+  across `src/` and `programs/`; it now reports `ok: docs complete`, so all four
+  audit dimensions (fmt, lint, docs, tests) are green.
+- **CI `integration` job** — runs `tests/integration/tc_fallback.sh`, the
+  roadmap item left open in 0.4.0. It probes `unshare -rn` first and
+  warns-and-skips if a runner forbids unprivileged user namespaces, so a
+  sandbox policy cannot red the build. That was the open question blocking the
+  wiring; the probe answers it per-run instead of once, up front.
+- **CI doc-coverage gate** in the build job, over the same `src/` + `programs/`
+  scope `cyrius audit` uses. `audit` counts undocumented fns but does not fail
+  on them, so without this the state above would quietly rot.
+
+### Tests
+- Unit suite 89 → **93**, adding `socket-recv-contract`: an AF_UNIX socketpair
+  where no peer ever writes, so the deadline is guaranteed to expire, then the
+  far end is closed to give a genuine clean close to compare against. It pins
+  both halves — expiry is `_TAAR_ERR_TIMEOUT`, close is `0`.
+- Mutation-checked: making the Linux arm map negatives to `0` (reproducing the
+  bug AGNOS had) turns the new group red. The test is host-only, like the rest
+  of the suite, and passes under `--aarch64` too.
+- Full sweep green: x86_64, aarch64 (`qemu-aarch64`), AGNOS build, live UDP and
+  TCP resolves, and all five integration cases.
+
+### Notes
+- The AGNOS arm still has no *executed* coverage anywhere — it compiles, and
+  the emitted image is confirmed to differ from the Linux one, but nothing runs
+  it. That is now the largest untested surface in the repo.
+- Consumer pins (`yo`, `dig`, `whirl` on `taar 0.3.1`) are unchanged here by
+  design — those repos are being updated separately.
+
 ## [0.4.0] — 2026-08-26 — DNS over TCP (TC fallback); last raw syscall retired
 
 Clears the two roadmap items that were actually actionable. The other two

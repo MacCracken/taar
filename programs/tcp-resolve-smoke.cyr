@@ -13,6 +13,8 @@
 
 include "src/main.cyr"
 
+# Resolve a hostname over TCP-53 and print the dotted-quad. Returns 0 on
+# success, or a small non-zero code identifying which stage failed.
 fn main() {
     alloc_init();
     var host = "example.com";

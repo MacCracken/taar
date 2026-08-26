@@ -3,6 +3,9 @@
 
 include "lib/syscalls.cyr"
 
+# No-op entry point. `[build].test` in cyrius.cyml must name a compilable
+# program; the real assertions live in tests/taar.tcyr, which `cyrius tests`
+# discovers directly. Exits 0.
 fn main() {
     return 0;
 }

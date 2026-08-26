@@ -24,6 +24,11 @@
   DNS reply acceptance bound to QR/id/QDCOUNT/question-echo on a connected
   socket (RFC 5452); entropy failures fail closed; heap scratch → stack.
   Suite 40 → 73, each guard mutation-verified; aarch64 CI leg added.
+- **0.5.0** — AGNOS `taar_tcp_recv` stopped reporting a deadline expiry as a
+  clean close (`_TAAR_ERR_TIMEOUT` vs `0`), matching the Linux arm and this
+  file's own `taar_udp_recv`. Doc comments on every public fn — `cyrius audit`
+  now green on all four dimensions. CI gained the `integration` job (TC
+  fallback, with an `unshare` probe) and a doc-coverage gate. Suite → 93.
 - **0.4.0** — DNS over TCP: `taar_resolve_ipv4` retries on the TC bit
   (RFC 1035 §4.2.2 length framing), falling back to the truncated datagram
   answer if the retry fails. `_taar_plat_dns_server` moved to the
@@ -40,12 +45,14 @@
   pre-built.
 - **`tls` / `http` submodules** — as `whirl` forces them (HTTPS today stops
   at the TCP layer taar provides).
-- **Consumer pin bump to 0.4.0** — `yo`, `dig` and `whirl` all still pin
-  `taar 0.3.1`, so none of them have the 0.3.3 security fixes. This is the
-  highest-value item on the list and it is consumer-repo work, not taar work.
-- **CI: wire `tests/integration/tc_fallback.sh`** — the TC path has no unit
-  coverage by nature. Needs a check that `unshare -rn` is permitted on the
-  GitHub runner before it becomes a gate.
+- **Executed coverage for the AGNOS backend** — the largest untested surface
+  left. Today the `#ifdef` arm is only compiled, and confirmed to produce a
+  different image from the Linux build; nothing ever runs it. Whether that
+  means a QEMU-booted agnos image in CI or a smaller in-repo harness is the
+  open design question.
+- **Consumer pin bump** — `yo`, `dig` and `whirl` pin `taar 0.3.1` and so lack
+  the 0.3.3 security fixes and everything since. Consumer-repo work, being
+  handled separately.
 
 ## Consumer migration
 

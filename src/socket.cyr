@@ -52,6 +52,12 @@ var _TAAR_IPPROTO_UDP = 17;
 var _TAAR_SOL_SOCKET  = 1;
 var _TAAR_SO_RCVTIMEO = 20;
 
+# Receive-deadline expiry, returned by both recv paths on both backends.
+# -11 is Linux's -EAGAIN, which is literally what a SO_RCVTIMEO expiry yields
+# from read(2)/recvfrom(2) — so the AGNOS poll loops report a timeout using the
+# same value the kernel would, and callers need one check, not two.
+var _TAAR_ERR_TIMEOUT = 0 - 11;
+
 # Fill a caller-provided 16-byte buffer as a sockaddr_in for `packed_addr`
 # (first-octet-high-byte) + `port` (written network byte order).
 #
@@ -79,10 +85,15 @@ fn taar_fill_sockaddr(sa, packed_addr, port): i64 {
 
 # --- UDP (DNS) ---
 
+# Open an unbound UDP socket. The source port is assigned by the kernel on
+# first send. Returns the fd, or a negative errno.
 fn taar_udp_open(): i64 {
     return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_DGRAM, _TAAR_IPPROTO_UDP);
 }
 
+# Bound how long a single taar_udp_recv will block, via SO_RCVTIMEO. A expiry
+# then surfaces as _TAAR_ERR_TIMEOUT. 0 means block indefinitely. Returns 0, or
+# a negative errno.
 fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
     var tv[16];
     store64(&tv, timeout_ms / 1000);
@@ -111,20 +122,31 @@ fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
     return sys_write(fd, pkt, pkt_len);
 }
 
+# Receive one datagram. Because taar_udp_send connects the socket, the kernel
+# has already dropped anything not from that peer. Returns bytes received (>0),
+# or a negative errno — _TAAR_ERR_TIMEOUT if the receive deadline expired.
+# A datagram longer than maxlen is truncated to it.
 fn taar_udp_recv(fd, buf, maxlen): i64 {
     return sys_recvfrom(fd, buf, maxlen, 0, 0, 0);
 }
 
+# Release a UDP socket. Split from taar_sock_close because AGNOS unbinds a
+# listener rather than closing a connection.
 fn taar_udp_close(fd): i64 {
     return sys_close(fd);
 }
 
 # --- TCP ---
 
+# Open a TCP socket. Returns the fd, or a negative errno. Pair with
+# taar_tcp_connect; release with taar_sock_close.
 fn taar_tcp_open(): i64 {
     return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
 }
 
+# Bound how long a single taar_tcp_recv will block, via SO_RCVTIMEO. An expiry
+# then surfaces as _TAAR_ERR_TIMEOUT, distinct from the 0 that means the peer
+# closed. 0 means block indefinitely. Returns 0, or a negative errno.
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
     var tv[16];
     store64(&tv, timeout_ms / 1000);
@@ -132,6 +154,8 @@ fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
     return sys_setsockopt(fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
 }
 
+# Connect to packed_addr:port. Blocks until the handshake completes, fails, or
+# the kernel gives up. Returns 0 on success, or a negative errno.
 fn taar_tcp_connect(fd, packed_addr, port): i64 {
     var sa[16];
     taar_fill_sockaddr(&sa, packed_addr, port);
@@ -144,10 +168,15 @@ fn taar_tcp_send(fd, buf, len): i64 {
     return sys_write(fd, buf, len);
 }
 
+# Read from the stream. Returns bytes read (>0), 0 when the peer has closed
+# cleanly, or a negative errno — _TAAR_ERR_TIMEOUT if the receive deadline
+# expired. Distinguishing those last two is what lets a caller tell a finished
+# response from a stalled one; see the AGNOS peer, which now matches.
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
     return sys_read(fd, buf, maxlen);
 }
 
+# Release a TCP socket.
 fn taar_sock_close(fd): i64 {
     return sys_close(fd);
 }
@@ -248,8 +277,9 @@ fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
 }
 
 # Non-blocking kernel recv polled against an uptime_ms deadline. Returns bytes
-# received (>0), -11 (-EAGAIN-ish on timeout, matching Linux SO_RCVTIMEO), or a
-# kernel error (<0). The 5ms inter-poll sleep keeps us off a busy-spin.
+# received (>0), _TAAR_ERR_TIMEOUT on deadline expiry (matching what Linux
+# SO_RCVTIMEO yields), or a kernel error (<0). The 5ms inter-poll sleep keeps
+# us off a busy-spin.
 fn taar_udp_recv(fd, buf, maxlen): i64 {
     var deadline = sys_uptime_ms() + _taar_ag_timeout_ms;
     while (sys_uptime_ms() < deadline) {
@@ -258,9 +288,11 @@ fn taar_udp_recv(fd, buf, maxlen): i64 {
         if (n < 0) { return n; }
         sys_sleep_ms(5);
     }
-    return 0 - 11;
+    return _TAAR_ERR_TIMEOUT;
 }
 
+# Release the UDP listener (udp_unbind#54). Split from taar_sock_close, which
+# closes a TCP conn_id — on AGNOS these are different kernel objects.
 fn taar_udp_close(fd): i64 {
     return sys_udp_unbind(fd);
 }
@@ -273,6 +305,8 @@ fn taar_tcp_open(): i64 {
     return 0;
 }
 
+# No SO_RCVTIMEO on AGNOS — remember the deadline window for the recv poll
+# loop. Always returns 0.
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
     _taar_ag_timeout_ms = timeout_ms;
     return 0;
@@ -295,14 +329,16 @@ fn taar_tcp_send(fd, buf, len): i64 {
 }
 
 # Poll sock_recv#49 (>0 data / 0 WOULD_BLOCK / -1 EOF) against the deadline,
-# mapping to the Linux blocking-read sense: >0 data, 0 = peer closed / timeout.
+# mapping to the Linux blocking-read sense. Returns bytes read (>0), 0 when the
+# peer closed cleanly, or _TAAR_ERR_TIMEOUT on deadline expiry.
 #
-# CAVEAT (unchanged contract, documented): a deadline expiry is reported as 0,
-# the same value as a clean peer close, so a caller cannot distinguish "the
-# response ended" from "the response stalled". A peer that stalls mid-body can
-# therefore make a truncated read look complete. Fixing this means giving
-# timeout its own negative return, which is a breaking change for whirl's
-# transport — tracked in docs/development/state.md carry-forward.
+# Through 0.4.0 a deadline expiry also returned 0 — indistinguishable from a
+# clean close, so a peer that stalled mid-body made a truncated read look like
+# a finished one, and the caller had no way to tell. Two things made that the
+# odd one out: the Linux peer already separates them (a SO_RCVTIMEO expiry is
+# -EAGAIN from read(2), a close is 0), and this file's own taar_udp_recv
+# already returned -11 on timeout. The AGNOS TCP path was the only place the
+# two collapsed, against a module contract that promises an identical surface.
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
     var deadline = sys_uptime_ms() + _taar_ag_timeout_ms;
     while (sys_uptime_ms() < deadline) {
@@ -311,9 +347,12 @@ fn taar_tcp_recv(fd, buf, maxlen): i64 {
         if (n < 0) { return 0; }        # -1 = EOF → "peer closed"
         sys_sleep_ms(2);                # 0 = WOULD_BLOCK → keep polling
     }
-    return 0;                            # timeout → treat as closed
+    return _TAAR_ERR_TIMEOUT;
 }
 
+# Close the active TCP conn (sock_close#50) and clear the slot. Safe to call
+# when no conn is open. Returns the kernel result, or 0 if there was nothing
+# to close.
 fn taar_sock_close(fd): i64 {
     if (_taar_ag_conn < 0) { return 0; }
     var r = sys_sock_close(_taar_ag_conn);

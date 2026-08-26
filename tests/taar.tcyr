@@ -285,6 +285,38 @@ fn test_dns_reply_ok() {
     return 0;
 }
 
+# === socket: recv return contract (timeout must not look like a clean close) ===
+#
+# Uses an AF_UNIX socketpair rather than the network: no peer ever writes, so
+# the deadline is guaranteed to expire, and closing the far end gives a real
+# clean close to compare against. Host-only, like the rest of this suite.
+#
+# This is the invariant the AGNOS backend was violating until 0.5.0 — it
+# returned 0 for both, so a stalled peer was indistinguishable from a finished
+# response. The Linux arm always got this right; the assertion pins both.
+fn test_socket_recv_contract() {
+    test_group("socket-recv-contract");
+    assert_eq(_TAAR_ERR_TIMEOUT, 0 - 11, "timeout constant is -EAGAIN");
+
+    var fds[16];
+    store64(&fds, 0);
+    var r = sys_socketpair(1, 1, 0, &fds);        # AF_UNIX, SOCK_STREAM
+    assert_eq(r, 0, "socketpair available");
+    var a = load32(&fds);
+    var b = load32(&fds + 4);
+    var buf[8];
+
+    taar_tcp_set_timeout_ms(a, 200);
+    var n = taar_tcp_recv(a, &buf, 8);            # nothing was ever written
+    assert_eq(n, _TAAR_ERR_TIMEOUT, "deadline expiry returns _TAAR_ERR_TIMEOUT");
+
+    sys_close(b);                                  # now a genuine clean close
+    var m = taar_tcp_recv(a, &buf, 8);
+    assert_eq(m, 0, "peer close returns 0");
+    sys_close(a);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_ipv4_parse();
@@ -299,6 +331,7 @@ fn main() {
     test_resolve_guards();
     test_dns_tcp_frame();
     test_dns_reply_ok();
+    test_socket_recv_contract();
     return assert_summary();
 }
 

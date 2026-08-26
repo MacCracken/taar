@@ -7,6 +7,8 @@
 
 include "src/main.cyr"
 
+# Resolve a hostname over UDP-53 and print the dotted-quad. Returns 0 on
+# success, 1 if the resolve failed.
 fn main() {
     alloc_init();
     var ip = taar_resolve_ipv4("example.com");

@@ -5,6 +5,15 @@
 
 ## Version
 
+**0.5.0** — 2026-08-26. Contract parity + CI completion. AGNOS
+`taar_tcp_recv` now returns `_TAAR_ERR_TIMEOUT` (-EAGAIN) on a deadline expiry
+instead of `0`, so a stalled peer is no longer indistinguishable from a
+finished response — the Linux arm and `taar_udp_recv` already did this, AGNOS
+TCP was the lone outlier. Every public fn documented, so `cyrius audit` is
+green on fmt, lint, **docs** and tests. CI gained an `integration` job (the TC
+harness, guarded by an `unshare -rn` probe) and a doc-coverage gate. Unit suite
+89 → **93**; `dist/taar.cyr` 966 lines.
+
 **0.4.0** — 2026-08-26. DNS over TCP. `taar_resolve_ipv4` now honours the TC
 (truncated) bit by re-asking over TCP-53 with RFC 1035 §4.2.2 length framing,
 holding the TCP reply to the same acceptance rules as the UDP one and falling
@@ -59,7 +68,7 @@ that snapshot. `cyrius distlib` also began emitting `dist/taar.deps`.
 | Module | Surface | Status |
 |--------|---------|--------|
 | `ipv4` | `ipv4_parse`, `ipv4_format_to_buf` | shipped 0.1.0 |
-| `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | shipped 0.2.0 (Linux); AGNOS backend 0.3.0 |
+| `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | shipped 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0 |
 | `dns` | `taar_resolve_ipv4` (resolver discovery + RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC) | shipped 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0 |
 | `icmp` | echo packet + checksum | planned (folds when `yo` migrates) |
 | `tcp`/`tls`/`http` | HTTPS transport growth | planned (`whirl`-driven) |
@@ -75,15 +84,16 @@ CYRIUS_TARGET_AGNOS`, resolved at the **consumer's** compile target.
 | `dig` | DNS resolver | pending — dedup onto `taar.dns` / `taar.socket` |
 | `yo` | ping / ICMP | pending — folds `ipv4`; drives the `icmp` module |
 
-## Verification (0.4.0)
+## Verification (0.5.0)
 
 Run from a clean `cyrius clean` + fresh `cyrius deps`.
 
-- `cyrius audit` — fmt clean, lint clean, tests green.
-- **x86_64**: smoke → `taar smoke ok`; `cyrius tests tests/` → 89 passed,
+- `cyrius audit` — fmt, lint, **docs** and tests all green (docs closed in
+  0.5.0; CI gates it so it cannot rot).
+- **x86_64**: smoke → `taar smoke ok`; `cyrius tests tests/` → 93 passed,
   0 failed; `resolve-smoke` (UDP) and `tcp-resolve-smoke` (TCP) both resolved a
   live domain.
-- **aarch64** (`qemu-aarch64`): `cyrius tests --aarch64` → 89 passed, 0 failed;
+- **aarch64** (`qemu-aarch64`): `cyrius tests --aarch64` → 93 passed, 0 failed;
   smoke ok; `tcp-resolve-smoke` resolved a live domain. The same check against
   0.3.2 exits 1 — this is the regression gate for the sendto defect.
 - **Integration** (`tests/integration/tc_fallback.sh`, x86_64 and aarch64): all
@@ -113,23 +123,18 @@ Run from a clean `cyrius clean` + fresh `cyrius deps`.
   `whirl` 0.6.4), so none of them carry the 0.3.3 security fixes — the aarch64
   `sendto` defect or the DNS reply-acceptance hardening — let alone 0.4.0.
   Bumping those pins is the highest-value open item; it is consumer-repo work.
-- Wire `tests/integration/tc_fallback.sh` into CI once `unshare -rn` is
-  confirmed permitted on the GitHub runner. Until then the TC path is guarded
-  only by a manual run.
-- 15 undocumented public fns reported by `cyrius audit` docs pass; not CI-gated.
-- **AGNOS `taar_tcp_recv` conflates timeout with EOF.** A deadline expiry
-  returns `0`, the same value as a clean peer close, so a peer that stalls
-  mid-body can make a truncated read look like a complete one. The fix is to
-  give timeout its own negative return, which is a breaking change for whirl's
-  transport — schedule it with a whirl cut, not a taar patch. 0.4.0's TCP DNS
-  read inherits this: on AGNOS a stall ends `_taar_dns_tcp_read_all` early, the
-  short read is refused, and the resolve falls back to the UDP answer. Safe,
-  but it means the TC retry is best-effort on AGNOS rather than reliable.
+- **Check the consumer before parking an item as "breaking".** The AGNOS
+  `taar_tcp_recv` fix sat here for two releases on the belief it would break
+  `whirl`. It did not: whirl's loop and cyrius's `tls_native` transport
+  contract both treat `<= 0` uniformly, which five minutes of reading the call
+  sites would have shown. Verify the claim before it becomes a blocker.
 - **`ipv4_parse` accepts leading zeros as decimal.** `010.1.1.1` parses as
   10.1.1.1; `inet_aton(3)` would read octal and say 8.1.1.1. Harmless while
   consumers use the packed return value, but a consumer that validates with
   taar and then hands the *string* to libc would get a different address —
   the classic parser-differential SSRF shape. Current behaviour is pinned by
   test; decide deliberately before changing it.
-- The AGNOS backend has no automated coverage at all — it only compiles. The
-  `#ifdef` arm is verified by build + image-differs, never executed.
+- **The AGNOS backend has no executed coverage** — it only compiles, and the
+  emitted image is confirmed to differ from the Linux one. Nothing runs it.
+  With docs, lint, aarch64 and the TC path all gated now, this is the largest
+  untested surface in the repo and the natural next investment.

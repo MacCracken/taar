@@ -14,8 +14,8 @@
 #   cyrius build programs/resolve-smoke.cyr build/taar-resolve
 #   tests/integration/tc_fallback.sh
 #
-# Not wired into CI yet — needs a check that `unshare -rn` is permitted on the
-# runner. See docs/development/state.md carry-forward.
+# Runs in CI as the `integration` job, which probes for `unshare -rn` first and
+# warns-and-skips if a runner forbids unprivileged user namespaces.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="${1:-$HERE/../../build/taar-resolve}"

@@ -7,6 +7,8 @@
 
 include "src/main.cyr"
 
+# Round-trip a known address through ipv4_parse -> ipv4_format_to_buf.
+# Returns 0 on success, 1 on either half mismatching.
 fn main() {
     alloc_init();
     # Round-trip a known address through parse → format.
