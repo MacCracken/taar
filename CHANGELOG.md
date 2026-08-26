@@ -4,6 +4,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-26 — DNS over TCP (TC fallback); last raw syscall retired
+
+Clears the two roadmap items that were actually actionable. The other two
+(`icmp`, `tls`/`http`) stay parked: both are gated on a consumer forcing the
+duplication, and neither consumer has.
+
+### Added
+- **DNS TCP fallback on truncation (RFC 1035 §4.2.2).** A reply with the TC bit
+  set is a *prefix* of the real answer — taar parsed it as though it were whole.
+  `taar_resolve_ipv4` now re-asks over TCP-53, which has no 512-byte ceiling:
+  - `_taar_dns_tcp_frame` — the 2-byte big-endian length prefix (pure, unit-tested).
+  - `_taar_dns_tcp_send_all` / `_taar_dns_tcp_read_all` — TCP is a stream that may
+    split or coalesce anywhere, so both loop. The send loop is spin-bounded
+    (`_TAAR_DNS_TCP_MAX_SPINS`) against a peer that accepts zero bytes forever;
+    the read loop always terminates because each pass advances or returns.
+  - `_taar_dns_query_tcp` — connect, framed send, framed read. A declared length
+    larger than the caller's buffer is **refused outright** rather than truncated:
+    trusting it would write the peer's number of bytes into a 2 KB stack array.
+  - `_taar_dns_reply_ok` — the 0.3.3 acceptance rules (QR / id / QDCOUNT /
+    question echo), factored out so the TCP reply is held to exactly the same
+    bar as the UDP one. The UDP path now calls it too.
+  - **Every failure path falls back to the truncated-but-valid datagram answer**,
+    which is what taar returned before this existed. The retry can only improve
+    an answer, never lose one.
+- **`programs/tcp-resolve-smoke.cyr`** — drives the TCP transport directly, since
+  no live resolver can be made to truncate on demand. Like `resolve-smoke`, it
+  needs a real resolver and is not a CI job.
+- **`tests/integration/`** — a fake DNS server (`fake_dns.py`) that answers
+  *differently* over UDP and TCP, plus `tc_fallback.sh`, which runs each case
+  inside `unshare -rn`. A private network namespace is what makes this possible
+  without root: it grants CAP_NET_BIND_SERVICE for port 53 and frees
+  127.0.0.53, so an unmodified `/etc/resolv.conf` points at the fake. Five cases:
+  TC=0 uses UDP; TC=1 retries TCP; TC=1 with no TCP listener falls back; and a
+  TCP peer that lies about its framed length (too long, too short) is refused.
+
+### Changed
+- **`_taar_plat_dns_server` uses `sys_net_dns_server()`** instead of the interim
+  raw `syscall(61, 3)`. cyrius 6.5.35 ships the wrapper (the agnos request
+  `2026-06-23-agnos-net-config-syscall-wrapper` landed), and its own comment
+  spells out why it matters: #61 is `net_config` on AGNOS but **`wait4(2)` on
+  Linux**. The `#ifdef` kept taar safe, but this was the last syscall number
+  written as a literal anywhere in the tree — the same class 0.3.3 was about.
+
+### Tests
+- Unit suite 73 → **89** assertions: `dns-tcp-frame` (prefix encoding, zero and
+  >65535 rejection, verbatim body copy) and `dns-reply-ok` (each acceptance rule
+  independently, plus that TC is *not* an acceptance failure — it is the retry
+  trigger).
+- New guards mutation-tested as in 0.3.3. Two notes on what that showed:
+  - The `mlen > rmax` bound is genuinely load-bearing — with it removed, the
+    `tc_huge` case delivers 60000 bytes into a 2048-byte stack buffer and the
+    process dies. The first version of that test declared a huge length without
+    sending it, so a short read masked the overflow; the server now delivers
+    every byte it claims.
+  - The `len < _TAAR_DNS_HEADER_LEN` check in `_taar_dns_reply_ok` does not move
+    the suite, because the question-echo check rejects the same inputs. It is
+    kept and commented: it is what makes the header reads above it in-bounds
+    rather than accidentally harmless.
+- Verified on x86_64, aarch64 (`qemu-aarch64`) and the AGNOS build target; the
+  integration harness passes against both the x86_64 and aarch64 binaries.
+
+### Notes
+- **`yo` 0.5.7, `dig` 0.3.5 and `whirl` 0.6.4 all pin `taar 0.3.1`.** They are
+  therefore missing the 0.3.3 fixes — the aarch64 `sendto` defect and the DNS
+  reply-acceptance hardening — as well as everything here. Bumping those pins is
+  consumer-repo work and is not part of this cut.
+- The integration harness is not wired into CI: `unshare -rn` needs to be
+  confirmed permitted on the runner first. Tracked in state.md carry-forward.
+
 ## [0.3.3] — 2026-08-26 — P-1 audit: hardening + repairs
 
 A priority-1 sweep of the whole substrate — arch portability, the DNS reply

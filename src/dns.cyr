@@ -25,6 +25,11 @@ var _TAAR_DNS_MAX_REPLIES   = 8;
 # Reply: 2048 covers the 512-byte classic UDP limit with EDNS headroom.
 var _TAAR_DNS_QBUF_LEN      = 300;
 var _TAAR_DNS_RBUF_LEN      = 2048;
+# TCP retry (RFC 1035 4.2.2). Its own timeout because a TCP exchange costs a
+# handshake on top of the query. MAX_SPINS bounds a peer that keeps accepting
+# zero bytes so send-all cannot livelock.
+var _TAAR_DNS_TCP_TIMEOUT_MS = 5000;
+var _TAAR_DNS_TCP_MAX_SPINS  = 64;
 
 var _TAAR_RESOLV_FALLBACK = 0x08080808;   # 8.8.8.8
 
@@ -308,6 +313,109 @@ fn _taar_resolv_discover(): i64 {
     return _TAAR_RESOLV_FALLBACK;
 }
 
+# --- TCP transport (RFC 1035 4.2.2) ---
+#
+# DNS over TCP is the same message body as UDP with a 2-byte big-endian length
+# prefix, on a stream that may split or coalesce anywhere. Everything below
+# exists to turn that stream back into one framed message.
+
+# Write the length prefix + query into `out`. Pure; `out` needs qlen + 2 bytes.
+# Returns the framed length, or 0 if qlen is out of range.
+fn _taar_dns_tcp_frame(qbuf, qlen, out): i64 {
+    if (qlen <= 0) { return 0; }
+    if (qlen > 0xFFFF) { return 0; }
+    store8(out, (qlen >> 8) & 0xFF);
+    store8(out + 1, qlen & 0xFF);
+    var i = 0;
+    while (i < qlen) {
+        store8(out + 2 + i, load8(qbuf + i));
+        i = i + 1;
+    }
+    return qlen + 2;
+}
+
+# write(2) may accept fewer bytes than offered, so loop. A peer that keeps
+# accepting zero is bounded by _TAAR_DNS_TCP_MAX_SPINS. Bytes sent, or -1.
+fn _taar_dns_tcp_send_all(fd, buf, len): i64 {
+    var off = 0;
+    var spins = 0;
+    while (off < len) {
+        var n = taar_tcp_send(fd, buf + off, len - off);
+        if (n < 0) { return 0 - 1; }
+        if (n == 0) {
+            spins = spins + 1;
+            if (spins > _TAAR_DNS_TCP_MAX_SPINS) { return 0 - 1; }
+        } else {
+            off = off + n;
+            spins = 0;
+        }
+    }
+    return off;
+}
+
+# Read exactly `want` bytes. Returns how many were actually read — a short
+# return means the peer closed or the deadline expired (taar_tcp_recv reports
+# both as 0), which the caller treats as a failed retry. Always terminates:
+# each pass either advances `off` or returns.
+fn _taar_dns_tcp_read_all(fd, buf, want): i64 {
+    var off = 0;
+    while (off < want) {
+        var n = taar_tcp_recv(fd, buf + off, want - off);
+        if (n <= 0) { return off; }
+        off = off + n;
+    }
+    return off;
+}
+
+# Re-ask `qbuf` over TCP-53 and land the reply body in `rbuf`. Returns the
+# message length (prefix excluded), or -1. A declared length larger than
+# `rmax` is refused outright rather than truncated — a half-read message
+# would parse as though it were whole.
+fn _taar_dns_query_tcp(ns, qbuf, qlen, rbuf, rmax): i64 {
+    var out[304];                       # _TAAR_DNS_QBUF_LEN + 2 prefix + slack
+    # _taar_dns_tcp_frame allows any qlen up to 0xFFFF — correct for the framing
+    # rule, but `out` is fixed. Every in-tree caller is bounded by
+    # _taar_dns_build_query (271 max), so this only fires on a future caller;
+    # it is here so the overflow cannot be introduced by one.
+    if (qlen + 2 > 304) { return 0 - 1; }
+    var framed = _taar_dns_tcp_frame(qbuf, qlen, &out);
+    if (framed == 0) { return 0 - 1; }
+
+    var fd = taar_tcp_open();
+    if (fd < 0) { return 0 - 1; }
+    taar_tcp_set_timeout_ms(fd, _TAAR_DNS_TCP_TIMEOUT_MS);
+    if (taar_tcp_connect(fd, ns, 53) < 0) { taar_sock_close(fd); return 0 - 1; }
+    if (_taar_dns_tcp_send_all(fd, &out, framed) < 0) { taar_sock_close(fd); return 0 - 1; }
+
+    var lb[2];
+    if (_taar_dns_tcp_read_all(fd, &lb, 2) != 2) { taar_sock_close(fd); return 0 - 1; }
+    var mlen = (load8(&lb) << 8) | load8(&lb + 1);
+    if (mlen < _TAAR_DNS_HEADER_LEN) { taar_sock_close(fd); return 0 - 1; }
+    if (mlen > rmax) { taar_sock_close(fd); return 0 - 1; }
+
+    var got = _taar_dns_tcp_read_all(fd, rbuf, mlen);
+    taar_sock_close(fd);
+    if (got != mlen) { return 0 - 1; }
+    return mlen;
+}
+
+# Apply the same acceptance rules as the UDP path to a reply sitting in `buf`.
+# 1 if it is a usable answer to our query, 0 otherwise.
+fn _taar_dns_reply_ok(qbuf, qlen, buf, len, id): i64 {
+    # Ordering guard: the header readers below index buf+2..buf+7, so a
+    # sub-header message must be rejected before they run or they would
+    # interpret whatever the receive buffer still held. The question-echo
+    # check at the bottom would also reject it, which is why removing this
+    # line does not move the test suite — keep it anyway, it is what makes
+    # the reads above it in-bounds rather than merely harmless.
+    if (len < _TAAR_DNS_HEADER_LEN) { return 0; }
+    if (_taar_dns_hdr_qr(buf) != 1) { return 0; }
+    if (_taar_dns_hdr_id(buf) != id) { return 0; }
+    if (_taar_dns_hdr_qdcount(buf) != 1) { return 0; }
+    if (_taar_dns_same_question(qbuf, qlen, buf, len) != 1) { return 0; }
+    return 1;
+}
+
 # === public ===
 
 # Resolve `host` (cstr) to an IPv4 (packed first-octet-high-byte). A literal
@@ -358,11 +466,7 @@ fn taar_resolve_ipv4(host): i64 {
         tries = tries + 1;
         var n = taar_udp_recv(fd, &rbuf, 2048);
         if (n < 0) { break; }                                          # timeout / error
-        if (n < _TAAR_DNS_HEADER_LEN) { continue; }                    # runt
-        if (_taar_dns_hdr_qr(&rbuf) != 1) { continue; }                # not a response
-        if (_taar_dns_hdr_id(&rbuf) != id) { continue; }               # not our query
-        if (_taar_dns_hdr_qdcount(&rbuf) != 1) { continue; }           # malformed
-        if (_taar_dns_same_question(&qbuf, qlen, &rbuf, n) != 1) { continue; }
+        if (_taar_dns_reply_ok(&qbuf, qlen, &rbuf, n, id) != 1) { continue; }
         rn = n;
         break;
     }
@@ -370,5 +474,21 @@ fn taar_resolve_ipv4(host): i64 {
 
     if (rn < 0) { return 0 - 1; }
     if (_taar_dns_hdr_rcode(&rbuf) != _TAAR_DNS_RCODE_NOERROR) { return 0 - 1; }
-    return _taar_dns_first_a(&rbuf, rn);
+    var answer = _taar_dns_first_a(&rbuf, rn);
+    if (_taar_dns_hdr_tc(&rbuf) != 1) { return answer; }
+
+    # TC set: the RRset did not fit in a datagram, so what we just parsed is a
+    # prefix of the real answer. Re-ask over TCP-53, which has no 512-byte
+    # ceiling. Read the UDP answer out first — the retry reuses rbuf.
+    #
+    # Every failure path falls back to `answer`, the truncated-but-valid
+    # datagram result, which is exactly what taar returned before this retry
+    # existed. The retry can therefore only improve an answer, never lose one.
+    var tn = _taar_dns_query_tcp(ns, &qbuf, qlen, &rbuf, 2048);
+    if (tn < 0) { return answer; }
+    if (_taar_dns_reply_ok(&qbuf, qlen, &rbuf, tn, id) != 1) { return answer; }
+    if (_taar_dns_hdr_rcode(&rbuf) != _TAAR_DNS_RCODE_NOERROR) { return answer; }
+    var tcp_answer = _taar_dns_first_a(&rbuf, tn);
+    if (tcp_answer < 0) { return answer; }
+    return tcp_answer;
 }

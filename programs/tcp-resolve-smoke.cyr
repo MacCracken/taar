@@ -1,0 +1,46 @@
+# taar TCP-resolve smoke — live check of the DNS-over-TCP path (RFC 1035 4.2.2).
+#
+# The TC fallback in taar_resolve_ipv4 only fires when a server truncates a
+# reply, which is not something a smoke can force. This drives the same
+# transport directly — frame, connect, length-prefixed send, framed read —
+# so the TCP path is exercised on demand rather than only in the rare case.
+#
+#   cyrius build programs/tcp-resolve-smoke.cyr build/taar-tcp-resolve
+#   ./build/taar-tcp-resolve         # -> e.g. 93.184.216.34
+#
+# Exit 0 + an IP printed = DNS over TCP works on this host. Not a CI job:
+# like resolve-smoke it needs a live resolver.
+
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+    var host = "example.com";
+
+    var id = _taar_plat_random_u16();
+    if (id < 0) { return 1; }
+    var ns = _taar_resolv_discover();
+    if (ns <= 0) { return 1; }
+
+    var qbuf[300];
+    var qlen = _taar_dns_build_query(&qbuf, id, host);
+    if (qlen <= 0) { return 1; }
+
+    var rbuf[2048];
+    var rn = _taar_dns_query_tcp(ns, &qbuf, qlen, &rbuf, 2048);
+    if (rn < 0) { return 2; }
+    if (_taar_dns_reply_ok(&qbuf, qlen, &rbuf, rn, id) != 1) { return 3; }
+    if (_taar_dns_hdr_rcode(&rbuf) != 0) { return 4; }
+
+    var ip = _taar_dns_first_a(&rbuf, rn);
+    if (ip < 0) { return 5; }
+
+    var b[16];
+    var n = ipv4_format_to_buf(ip, &b);
+    store8(&b + n, 10);            # newline
+    sys_write(1, &b, n + 1);
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

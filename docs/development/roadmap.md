@@ -19,28 +19,43 @@
   via `net_config`#61 (on-subnet, ARP-reachable) ahead of `/etc/resolv.conf`.
 - **0.3.2** — toolchain + stdlib refresh: cyrius pin `6.2.6` → `6.5.35`, all
   vendored `lib/*.cyr` re-resolved, `dist/taar.deps` sidecar. No `src/` change.
+- **0.3.3** — P-1 audit. Linux backend moved off hardcoded x86_64 syscall
+  numbers (aarch64 `sendto` → `fstatfs` silently broke every resolve there);
+  DNS reply acceptance bound to QR/id/QDCOUNT/question-echo on a connected
+  socket (RFC 5452); entropy failures fail closed; heap scratch → stack.
+  Suite 40 → 73, each guard mutation-verified; aarch64 CI leg added.
+- **0.4.0** — DNS over TCP: `taar_resolve_ipv4` retries on the TC bit
+  (RFC 1035 §4.2.2 length framing), falling back to the truncated datagram
+  answer if the retry fails. `_taar_plat_dns_server` moved to the
+  `sys_net_dns_server()` wrapper — the last raw syscall literal in the tree.
+  Suite → 89, plus a netns-based integration harness for the TC path.
 
 ## Next (per second-consumer / duplication trigger)
 
-- **`icmp` module** — echo packet construction + checksum (from `yo`). Folds
-  when `yo` migrates; the AGNOS side is `icmp_echo`#55.
+- **`icmp` module** — echo packet construction + checksum, lifted from `yo`'s
+  `icmp.cyr`; the AGNOS side is `icmp_echo`#55. Note the trigger has *not*
+  fired: `yo` is already on `[deps.taar]`, but it is still the only consumer
+  with ICMP, so nothing is duplicated yet. Per CLAUDE.md this waits for a
+  second ICMP consumer (traceroute is the likely one) rather than being
+  pre-built.
 - **`tls` / `http` submodules** — as `whirl` forces them (HTTPS today stops
   at the TCP layer taar provides).
-- **DNS TCP fallback on TC** — when a reply sets the TC (truncated) bit, retry
-  the query over TCP-53 rather than parsing the partial UDP message.
-  `_taar_dns_hdr_tc` already surfaces the bit; the transport
-  (`taar_tcp_*`) is already in place.
-- **`sys_net_config` wrapper** — replace the interim raw `syscall(61, 3)` in
-  `src/socket.cyr` once cyrius ships the typed wrapper (requested as agnos
-  `2026-06-23-agnos-net-config-syscall-wrapper`).
+- **Consumer pin bump to 0.4.0** — `yo`, `dig` and `whirl` all still pin
+  `taar 0.3.1`, so none of them have the 0.3.3 security fixes. This is the
+  highest-value item on the list and it is consumer-repo work, not taar work.
+- **CI: wire `tests/integration/tc_fallback.sh`** — the TC path has no unit
+  coverage by nature. Needs a check that `unshare -rn` is permitted on the
+  GitHub runner before it becomes a gate.
 
 ## Consumer migration
 
 - `whirl` → **done** (0.2.0): HTTP transport on `taar_tcp_*` +
   `taar_resolve_ipv4`.
-- `dig` → `[deps.taar]`, drop in-tree `ipv4.cyr` and dedup its
-  `dns.cyr`/`resolv.cyr` onto `taar.dns`/`taar.socket`; verify host + `--agnos`.
-- `yo` → `[deps.taar]`, drop in-tree `ipv4.cyr`; drives the `icmp` fold.
+- `dig` → on `[deps.taar]`; in-tree `ipv4.cyr` **already dropped**. Still
+  carries its own `dns.cyr` + `resolv.cyr` — that dedup onto `taar.dns` /
+  `taar.socket` is what remains. Verify host + `--agnos` after.
+- `yo` → on `[deps.taar]`; in-tree `ipv4.cyr` **already dropped**. Still
+  carries `icmp.cyr` + `dns.cyr`; the `icmp` fold is the open piece.
 
 ## v1.0 criteria (not yet scheduled)
 

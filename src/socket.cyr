@@ -348,13 +348,16 @@ fn _taar_plat_read_file(path, buf, maxlen): i64 {
     return n;
 }
 
-# AGNOS net_config(field=3) → the DHCP-leased DNS resolver (option 6, else the
-# leased gateway), packed first-octet-high-byte; 0 if unconfigured / -1 on an
-# unknown field. Preferred over /etc/resolv.conf (typically absent on agnos) and
-# over the off-subnet public fallback (8.8.8.8): the leased resolver is on-subnet,
-# so it routes without depending on gateway-MAC egress. Raw syscall #61 by design —
-# cyrius >= the release that ships `sys_net_config` will let this drop to the wrapper
-# (see the cyrius issue 2026-06-23-agnos-net-config-syscall-wrapper). a2..a4 unused.
-var _TAAR_AG_SYS_NET_CONFIG = 61;
-fn _taar_plat_dns_server(): i64 { return syscall(_TAAR_AG_SYS_NET_CONFIG, 3); }
+# The DHCP-leased DNS resolver (option 6, else the leased gateway), packed
+# first-octet-high-byte; 0 if unconfigured. Preferred over /etc/resolv.conf
+# (typically absent on agnos) and over the off-subnet public fallback
+# (8.8.8.8): the leased resolver is on-subnet, so it routes without depending
+# on gateway-MAC egress.
+#
+# 0.3.1 shipped this as a raw `syscall(61, 3)` because cyrius had no wrapper.
+# 6.5.35 ships one, so the literal is gone — the last in taar. The agnos
+# syscall lib spells out why that matters: #61 is net_config on AGNOS but
+# wait4(2) on Linux. The #ifdef kept us safe, but a number that means two
+# different things on two kernels does not belong in a source file.
+fn _taar_plat_dns_server(): i64 { return sys_net_dns_server(); }
 #endif
