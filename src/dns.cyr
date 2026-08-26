@@ -17,6 +17,14 @@ var _TAAR_DNS_MAX_LABEL     = 63;
 var _TAAR_DNS_MAX_NAME      = 255;
 var _TAAR_DNS_MAX_HOPS      = 32;
 var _TAAR_DNS_RCODE_NOERROR = 0;
+# Datagrams to examine before giving up on a matching reply. Stray, duplicate
+# and forged packets are discarded and the wait continues rather than aborting
+# the whole resolve — one unmatched packet used to be enough to kill it.
+var _TAAR_DNS_MAX_REPLIES   = 8;
+# Scratch sizes. Query: 12 header + 255 max wire name + 4 qtype/qclass = 271.
+# Reply: 2048 covers the 512-byte classic UDP limit with EDNS headroom.
+var _TAAR_DNS_QBUF_LEN      = 300;
+var _TAAR_DNS_RBUF_LEN      = 2048;
 
 var _TAAR_RESOLV_FALLBACK = 0x08080808;   # 8.8.8.8
 
@@ -38,6 +46,14 @@ fn _taar_dns_hdr_id(msg): i64      { return (load8(msg) << 8) | load8(msg + 1); 
 fn _taar_dns_hdr_qdcount(msg): i64 { return (load8(msg + 4) << 8) | load8(msg + 5); }
 fn _taar_dns_hdr_ancount(msg): i64 { return (load8(msg + 6) << 8) | load8(msg + 7); }
 fn _taar_dns_hdr_rcode(msg): i64   { return ((load8(msg + 2) << 8) | load8(msg + 3)) & 0x0F; }
+# QR (bit 15 of the flags word): 1 = response, 0 = query. An unsolicited query
+# arriving at our source port must never be parsed as though it were an answer.
+fn _taar_dns_hdr_qr(msg): i64      { return (load8(msg + 2) >> 7) & 1; }
+# TC (bit 9): the server truncated the message. Not rejected here — any A
+# record that did fit is still authoritative-as-sent — but a caller that needs
+# the complete RRset must retry over TCP. That fallback is a roadmap item
+# (docs/development/roadmap.md → "DNS TCP fallback on TC").
+fn _taar_dns_hdr_tc(msg): i64      { return (load8(msg + 2) >> 1) & 1; }
 
 # Encode "example.com" → wire labels at `out`. Returns bytes written, or 0.
 fn _taar_dns_encode_name(name, out): i64 {
@@ -49,7 +65,12 @@ fn _taar_dns_encode_name(name, out): i64 {
     while (1) {
         var c = load8(name + src);
         if (c == 0) {
-            if (dst - label_start == 1) { return dst; }
+            if (dst - label_start == 1) {
+                # src == 0 → the whole name was empty; anything else is a
+                # legitimate trailing dot ("example.com."), already terminated.
+                if (src == 0) { return 0; }
+                return dst;
+            }
             var llen = dst - label_start - 1;
             if (llen > _TAAR_DNS_MAX_LABEL) { return 0; }
             store8(out + label_start, llen);
@@ -109,6 +130,9 @@ fn _taar_dns_skip_name(msg, msg_len, off): i64 {
             if (cur + 1 >= msg_len) { return 0; }
             var b2 = load8(msg + cur + 1);
             var ptr = ((b & 0x3F) << 8) | b2;
+            # Redundant given the `ptr >= cur` rule below (cur < msg_len is
+            # already established at the top of the loop) — kept as a bound
+            # that survives if that ordering is ever refactored.
             if (ptr >= msg_len) { return 0; }
             if (end_off == 0) { end_off = cur + 2; }
             hops = hops + 1;
@@ -166,6 +190,23 @@ fn _taar_dns_first_a(msg, msg_len): i64 {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+# Does the reply echo back the exact question we asked?
+#
+# RFC 1035 requires a server to copy the question section verbatim, so a
+# byte-compare of [12, qlen) against the query we sent binds the reply to this
+# specific QNAME/QTYPE/QCLASS. Without it, a reply carrying the right ID could
+# answer a different question entirely and taar would take its first A record.
+fn _taar_dns_same_question(qbuf, qlen, rbuf, rlen): i64 {
+    if (qlen <= _TAAR_DNS_HEADER_LEN) { return 0; }
+    if (rlen < qlen) { return 0; }
+    var i = _TAAR_DNS_HEADER_LEN;
+    while (i < qlen) {
+        if (load8(rbuf + i) != load8(qbuf + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # --- resolv.conf discovery (ported from dig's resolv.cyr) ---
@@ -254,10 +295,14 @@ fn _taar_resolv_parse(buf, len): i64 {
 fn _taar_resolv_discover(): i64 {
     var ksrv = _taar_plat_dns_server();
     if (ksrv > 0) { return ksrv; }
-    var buf = alloc(4096);
-    var n = _taar_plat_read_file("/etc/resolv.conf", buf, 4096);
+    # Stack scratch, not alloc(): cyrius's alloc is a bump allocator with no
+    # per-pointer free, so every heap byte taken here leaked for the process
+    # lifetime — 4KB on each resolve. socket.cyr is allocator-free by design
+    # and dns.cyr now matches it.
+    var buf[4096];
+    var n = _taar_plat_read_file("/etc/resolv.conf", &buf, 4096);
     if (n > 0) {
-        var addr = _taar_resolv_parse(buf, n);
+        var addr = _taar_resolv_parse(&buf, n);
         if (addr > 0) { return addr; }
     }
     return _TAAR_RESOLV_FALLBACK;
@@ -267,31 +312,63 @@ fn _taar_resolv_discover(): i64 {
 
 # Resolve `host` (cstr) to an IPv4 (packed first-octet-high-byte). A literal
 # dotted-quad short-circuits. Returns -1 on failure (resolve / timeout / no A).
+#
+# Reply acceptance is deliberately strict (RFC 5452). A datagram is only
+# parsed for answers once it is a response (QR=1), carries our query ID,
+# holds exactly one question, and echoes that question byte-for-byte. The
+# kernel additionally drops anything not from the nameserver we sent to,
+# because taar_udp_send connects the socket. Non-matching datagrams are
+# skipped and the wait resumes, up to _TAAR_DNS_MAX_REPLIES.
+#
+# Tradeoff: the worst-case wait becomes _TAAR_DNS_MAX_REPLIES × the socket
+# timeout (8 x 5s) instead of a single 5s, if something can land a
+# non-matching datagram just before each expiry. Since the socket is
+# connected, doing that requires forging the nameserver's own address and
+# port — an on-path position. Trading that bounded latency for "one stray
+# packet kills the resolve" is the right way round.
 fn taar_resolve_ipv4(host): i64 {
     if (host == 0) { return 0 - 1; }
+    if (load8(host) == 0) { return 0 - 1; }
     var lit = ipv4_parse(host);
     if (lit >= 0) { return lit; }
 
-    var ns = _taar_resolv_discover();
+    # Fail closed on an entropy failure: resolving with a guessable query ID
+    # is worse than not resolving.
     var id = _taar_plat_random_u16();
+    if (id < 0) { return 0 - 1; }
 
-    var qbuf = alloc(300);
-    var qlen = _taar_dns_build_query(qbuf, id, host);
+    var ns = _taar_resolv_discover();
+    if (ns <= 0) { return 0 - 1; }
+
+    var qbuf[300];
+    var qlen = _taar_dns_build_query(&qbuf, id, host);
     if (qlen <= 0) { return 0 - 1; }
 
     var fd = taar_udp_open();
     if (fd < 0) { return 0 - 1; }
     taar_udp_set_timeout_ms(fd, 5000);
 
-    var sent = taar_udp_send(fd, ns, 53, qbuf, qlen);
+    var sent = taar_udp_send(fd, ns, 53, &qbuf, qlen);
     if (sent < 0) { taar_udp_close(fd); return 0 - 1; }
 
-    var rbuf = alloc(2048);
-    var rn = taar_udp_recv(fd, rbuf, 2048);
+    var rbuf[2048];
+    var rn = 0 - 1;
+    var tries = 0;
+    while (tries < _TAAR_DNS_MAX_REPLIES) {
+        tries = tries + 1;
+        var n = taar_udp_recv(fd, &rbuf, 2048);
+        if (n < 0) { break; }                                          # timeout / error
+        if (n < _TAAR_DNS_HEADER_LEN) { continue; }                    # runt
+        if (_taar_dns_hdr_qr(&rbuf) != 1) { continue; }                # not a response
+        if (_taar_dns_hdr_id(&rbuf) != id) { continue; }               # not our query
+        if (_taar_dns_hdr_qdcount(&rbuf) != 1) { continue; }           # malformed
+        if (_taar_dns_same_question(&qbuf, qlen, &rbuf, n) != 1) { continue; }
+        rn = n;
+        break;
+    }
     taar_udp_close(fd);
-    if (rn < _TAAR_DNS_HEADER_LEN) { return 0 - 1; }
-    if (_taar_dns_hdr_id(rbuf) != id) { return 0 - 1; }
-    if (_taar_dns_hdr_rcode(rbuf) != _TAAR_DNS_RCODE_NOERROR) { return 0 - 1; }
 
-    return _taar_dns_first_a(rbuf, rn);
+    if (rn < 0) { return 0 - 1; }
+    if (_taar_dns_hdr_rcode(&rbuf) != _TAAR_DNS_RCODE_NOERROR) { return 0 - 1; }
+    return _taar_dns_first_a(&rbuf, rn);
 }

@@ -14,7 +14,7 @@ fn main() {
     var b = alloc(16);
     var n = ipv4_format_to_buf(ip, b);
     store8(b + n, 10);             # newline
-    syscall(1, 1, b, n + 1);       # write(stdout, ip\n)
+    sys_write(1, b, n + 1);        # write(stdout, ip\n) — arch-dispatched
     return 0;
 }
 

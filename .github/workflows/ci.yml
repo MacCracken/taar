@@ -87,6 +87,38 @@ jobs:
       - name: Unit tests
         run: cyrius test tests/taar.tcyr
 
+  aarch64:
+    name: aarch64 Cross-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Install qemu-user (aarch64 emulation)
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
+
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Build + run the suite for aarch64
+        # taar hardcoded x86_64 syscall numbers until 0.3.3. cyrius's aarch64
+        # backend remaps most of them, so `--aarch64` BUILT CLEAN while
+        # taar_udp_send silently ran fstatfs(2) instead of sendto and every
+        # resolve timed out. A build-only check would not have caught it —
+        # this leg must actually execute the binaries.
+        run: |
+          mkdir -p build
+          cyrius build --aarch64 programs/smoke.cyr build/taar-smoke-a64
+          qemu-aarch64 build/taar-smoke-a64
+          cyrius tests --aarch64 tests/
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

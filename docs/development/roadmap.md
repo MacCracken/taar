@@ -26,6 +26,10 @@
   when `yo` migrates; the AGNOS side is `icmp_echo`#55.
 - **`tls` / `http` submodules** — as `whirl` forces them (HTTPS today stops
   at the TCP layer taar provides).
+- **DNS TCP fallback on TC** — when a reply sets the TC (truncated) bit, retry
+  the query over TCP-53 rather than parsing the partial UDP message.
+  `_taar_dns_hdr_tc` already surfaces the bit; the transport
+  (`taar_tcp_*`) is already in place.
 - **`sys_net_config` wrapper** — replace the interim raw `syscall(61, 3)` in
   `src/socket.cyr` once cyrius ships the typed wrapper (requested as agnos
   `2026-06-23-agnos-net-config-syscall-wrapper`).

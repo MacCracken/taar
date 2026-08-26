@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.3.2.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.3.3.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 `whirl` (HTTP/S) drove the `socket` and `dns` folds and runs on taar today;
@@ -46,7 +46,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.3.2"
+tag = "0.3.3"
 modules = ["dist/taar.cyr"]
 ```
 
@@ -64,7 +64,8 @@ Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.5.35`); run
 
 ```sh
 cyrius build programs/smoke.cyr build/taar-smoke   # compiles + round-trips an address
-cyrius tests tests/                                 # tests/taar.tcyr — 40 assertions
+cyrius tests tests/                                 # tests/taar.tcyr — 73 assertions
+cyrius tests --aarch64 tests/                       # same suite, aarch64 (needs qemu-user)
 cyrius build programs/resolve-smoke.cyr build/taar-resolve   # live DNS check
 cyrius distlib                                      # regenerate dist/taar.cyr + .deps
 cyrius audit                                        # fmt + lint + docs + tests sweep

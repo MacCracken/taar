@@ -27,6 +27,17 @@ fn test_ipv4_parse() {
     assert_eq(ipv4_parse(""),           IPV4_PARSE_FAIL, "ipv4 empty string");
     assert_eq(ipv4_parse("1.2.3.4 "),   IPV4_PARSE_FAIL, "ipv4 trailing space");
     assert_eq(ipv4_parse("1234.0.0.0"), IPV4_PARSE_FAIL, "ipv4 4-digit octet");
+    assert_eq(ipv4_parse("1.2.3.4\n"),  IPV4_PARSE_FAIL, "ipv4 trailing newline");
+    assert_eq(ipv4_parse("0x7f.0.0.1"), IPV4_PARSE_FAIL, "ipv4 hex rejected");
+    assert_eq(ipv4_parse(".1.2.3"),     IPV4_PARSE_FAIL, "ipv4 leading dot");
+    assert_eq(ipv4_parse("1.2.3.4."),   IPV4_PARSE_FAIL, "ipv4 trailing dot");
+    # Leading zeros are ACCEPTED and read as decimal: "010" is 10, not octal 8.
+    # inet_aton(3) would read 8, so a consumer that validates a string here and
+    # then re-parses it with libc gets a different address. taar's callers use
+    # the packed return value, not the string, so this is pinned rather than
+    # changed — see docs/development/state.md carry-forward.
+    assert_eq(ipv4_parse("010.1.1.1"),  0x0A010101, "ipv4 leading zero = decimal");
+    assert_eq(ipv4_parse("00.0.0.0"),   0x00000000, "ipv4 double zero accepted");
     return 0;
 }
 
@@ -123,6 +134,108 @@ fn test_dns_parse_a() {
     assert_eq(_taar_dns_first_a(buf, len), 0x5DB8D822, "A record 93.184.216.34");
 }
 
+
+# === dns: reply acceptance (RFC 5452 binding) ===
+fn test_dns_reply_match() {
+    test_group("dns-reply-match");
+    var q = alloc(300);
+    var ql = _taar_dns_build_query(q, 0x1234, "example.com");
+    var r = alloc(256);
+    var rl = _canned_a_response(r);          # same id + same qname
+    assert_eq(ql, 29, "query len (12 + 13 + 4)");
+    assert_eq(_taar_dns_hdr_qr(q), 0, "outbound query has QR=0");
+    assert_eq(_taar_dns_hdr_qr(r), 1, "response has QR=1");
+    assert_eq(_taar_dns_hdr_tc(r), 0, "response not truncated");
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 1, "echoed question matches");
+    # A reply that carries our id but answers a different name must be refused.
+    store8(r + 13, 120);                      # 'e' -> 'x' in the echoed qname
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 0, "altered qname refused");
+    store8(r + 13, 101);                      # restore
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 1, "restored qname matches");
+    # Too short to even contain the question we asked.
+    assert_eq(_taar_dns_same_question(q, ql, r, 20), 0, "runt reply refused");
+    return 0;
+}
+
+# === dns: hostile wire input (the parser sees attacker-chosen bytes) ===
+fn test_dns_hostile() {
+    test_group("dns-hostile");
+    var m = alloc(64);
+    var i = 0;
+    while (i < 64) { store8(m + i, 0); i = i + 1; }
+
+    # Valid backward pointer is the control: name at 12, pointer to it at 20.
+    store8(m + 12, 1); store8(m + 13, 97); store8(m + 14, 0);   # "a."
+    store8(m + 20, 0xC0); store8(m + 21, 0x0C);
+    assert_eq(_taar_dns_skip_name(m, 64, 20), 22, "backward pointer accepted");
+
+    # Self-referential pointer — the classic decompression loop.
+    store8(m + 12, 0xC0); store8(m + 13, 0x0C);
+    assert_eq(_taar_dns_skip_name(m, 64, 12), 0, "self-pointer refused");
+    # Forward pointer (would allow unbounded advance).
+    store8(m + 13, 0x20);
+    assert_eq(_taar_dns_skip_name(m, 64, 12), 0, "forward pointer refused");
+    # Pointer target past the end of the message.
+    store8(m + 13, 0xFF);
+    assert_eq(_taar_dns_skip_name(m, 64, 12), 0, "out-of-range pointer refused");
+    # 0x40/0x80 are reserved label-length prefixes, not lengths. Use a buffer
+    # big enough that treating 0x40 as the length 64 would still land in bounds
+    # — otherwise the end-of-message check masks the prefix check.
+    var big = alloc(256);
+    var k = 0;
+    while (k < 256) { store8(big + k, 0); k = k + 1; }
+    store8(big + 12, 0x40);                   # 0b01xxxxxx: reserved, not len 64
+    assert_eq(_taar_dns_skip_name(big, 256, 12), 0, "reserved label prefix refused");
+    store8(big + 12, 63);                     # 63 is the largest legal label
+    assert_eq(_taar_dns_skip_name(big, 256, 12), 77, "max-length label accepted");
+    # Label that runs off the end of the buffer.
+    store8(m + 12, 60);
+    assert_eq(_taar_dns_skip_name(m, 20, 12), 0, "label past end refused");
+
+    # An A record whose rdlength claims more bytes than the message holds.
+    var b = alloc(128);
+    var len = _canned_a_response(b);
+    assert_eq(_taar_dns_first_a(b, len), 0x5DB8D822, "well-formed A parses");
+    # rdata that runs past the declared end of the message. rdlength still says
+    # 4 (so the A-record branch IS entered) but the message is two bytes short —
+    # only the rdata+rdlen bounds check stops the over-read.
+    assert_eq(_taar_dns_first_a(b, len - 2), 0 - 1, "rdata past message end refused");
+    # An A record whose rdlength is not 4 is not a v4 address; skip it.
+    _taar_dns_store_u16(b, len - 6, 0xFFFF);
+    assert_eq(_taar_dns_first_a(b, len), 0 - 1, "non-4 rdlength for A skipped");
+    # Header-only truncation: the question can no longer be skipped.
+    assert_eq(_taar_dns_first_a(b, 13), 0 - 1, "truncated message refused");
+    return 0;
+}
+
+# === dns: name encoding edge cases ===
+fn test_dns_encode_edges() {
+    test_group("dns-encode-edges");
+    var o1 = alloc(300);
+    var o2 = alloc(300);
+    var n1 = _taar_dns_encode_name("example.com", o1);
+    var n2 = _taar_dns_encode_name("example.com.", o2);
+    assert_eq(n2, n1, "trailing dot encodes identically");
+    # An empty name used to encode as the bare root label, which build_query
+    # turned into a well-formed query for "." — now refused outright.
+    assert_eq(_taar_dns_encode_name("", o1), 0, "empty name refused");
+    assert_eq(_taar_dns_build_query(o1, 1, ""), 0, "empty-name query refused");
+    # Empty interior label.
+    assert_eq(_taar_dns_encode_name("a..b", o1), 0, "empty interior label refused");
+    return 0;
+}
+
+# === resolve: offline guard paths (no socket is opened for any of these) ===
+fn test_resolve_guards() {
+    test_group("resolve-guards");
+    assert_eq(taar_resolve_ipv4(0), 0 - 1, "null host refused");
+    assert_eq(taar_resolve_ipv4(""), 0 - 1, "empty host refused");
+    # A dotted-quad literal short-circuits before any DNS traffic.
+    assert_eq(taar_resolve_ipv4("127.0.0.1"), 0x7F000001, "literal short-circuits");
+    assert_eq(taar_resolve_ipv4("8.8.8.8"), 0x08080808, "literal short-circuits (2)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_ipv4_parse();
@@ -131,8 +244,12 @@ fn main() {
     test_dns_encode();
     test_dns_build();
     test_dns_parse_a();
+    test_dns_reply_match();
+    test_dns_hostile();
+    test_dns_encode_edges();
+    test_resolve_guards();
     return assert_summary();
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+syscall(SYS_EXIT, exit_code);

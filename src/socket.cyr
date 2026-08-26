@@ -5,7 +5,8 @@
 # emit target (no lib/net.cyr — the family per-backend posture: thin, no
 # tagged-union wrappers):
 #
-#   #ifndef CYRIUS_TARGET_AGNOS  → Linux: raw POSIX socket(2) syscalls.
+#   #ifndef CYRIUS_TARGET_AGNOS  → POSIX/Linux: socket(2) family via the
+#                                  stdlib's ARCH-DISPATCHED sys_* wrappers.
 #   #ifdef  CYRIUS_TARGET_AGNOS  → AGNOS: sovereign sock_*#47-50 / udp_*#51-54
 #                                  + getrandom#45 + the FS / uptime / sleep
 #                                  wrappers from cyrius's agnos syscall lib.
@@ -15,27 +16,33 @@
 # platform helpers DNS needs (`_taar_plat_random_u16`, `_taar_plat_read_file`)
 # live here too, so dns.cyr stays platform-neutral RFC-1035 framing.
 #
-# Allocator-free on Linux: all scratch (sockaddr_in, timeval) is function-local
-# stack. AGNOS is connection-id based, so its TCP path tracks one active conn
-# in a module global (taar is single-connection-at-a-time, single-threaded).
+# Allocator-free: all scratch (sockaddr_in, timeval) is function-local stack.
+# AGNOS is connection-id based, so its TCP path tracks one active conn in a
+# module global (taar is single-connection-at-a-time, single-threaded).
 #
 # IPv4 addresses are packed first-octet-in-high-byte (0xC0A80101 = 192.168.1.1),
 # matching taar's ipv4_parse / ipv4_format_to_buf and the agnos kernel's ip4().
+#
+# SYSCALL NUMBERS COME FROM THE STDLIB, NEVER FROM LITERALS.
+#
+# cyrius's aarch64 backend rewrites the x86_64 syscall numbers it recognises
+# (ESYSXLAT), so most hardcoded literals happen to survive a --aarch64 build.
+# The exceptions are the numbers it deliberately cannot remap — those that
+# collide with a different native aarch64 call — and they fail SILENTLY.
+# taar shipped one: sendto. x86_64 44 is sendto; aarch64 44 is fstatfs(2), and
+# there is no ESYSXLAT entry (nor stdlib wrapper) for it. Verified under
+# qemu-aarch64: the old raw `syscall(44, fd, pkt, len, …)` returned 0 as though
+# it had sent nothing, wrote ~120 bytes of struct statfs over the caller's
+# packet buffer, and left every DNS resolve to time out. A --aarch64 build was
+# clean; only running it showed the break.
+#
+# So: go through the stdlib's arch-dispatched sys_* wrappers. Where one does
+# not exist (there is no sendto wrapper), restructure to a call that has one —
+# see taar_udp_send, which connects and write(2)s instead.
 
-#ifndef CYRIUS_TARGET_AGNOS
 # ===================================================================
-# Linux backend — raw POSIX socket syscalls.
+# Shared (backend-independent) — pure address packing, no syscalls.
 # ===================================================================
-
-var _TAAR_SYS_READ       = 0;
-var _TAAR_SYS_WRITE      = 1;
-var _TAAR_SYS_OPEN       = 2;
-var _TAAR_SYS_CLOSE      = 3;
-var _TAAR_SYS_SOCKET     = 41;
-var _TAAR_SYS_CONNECT    = 42;
-var _TAAR_SYS_SENDTO     = 44;
-var _TAAR_SYS_RECVFROM   = 45;
-var _TAAR_SYS_SETSOCKOPT = 54;
 
 var _TAAR_AF_INET     = 2;
 var _TAAR_SOCK_STREAM = 1;
@@ -44,10 +51,14 @@ var _TAAR_IPPROTO_TCP = 6;
 var _TAAR_IPPROTO_UDP = 17;
 var _TAAR_SOL_SOCKET  = 1;
 var _TAAR_SO_RCVTIMEO = 20;
-var _TAAR_O_RDONLY    = 0;
 
 # Fill a caller-provided 16-byte buffer as a sockaddr_in for `packed_addr`
 # (first-octet-high-byte) + `port` (written network byte order).
+#
+# Defined outside both #ifdef arms: it is pure byte packing with no syscall,
+# and the module contract promises an identical taar_* surface on every
+# target. It previously lived inside the Linux arm only, so an AGNOS-target
+# consumer calling it failed to link.
 fn taar_fill_sockaddr(sa, packed_addr, port): i64 {
     var i = 0;
     while (i < 16) { store8(sa + i, 0); i = i + 1; }
@@ -61,82 +72,114 @@ fn taar_fill_sockaddr(sa, packed_addr, port): i64 {
     return 0;
 }
 
+#ifndef CYRIUS_TARGET_AGNOS
+# ===================================================================
+# POSIX/Linux backend — socket(2) family via arch-dispatched sys_* wrappers.
+# ===================================================================
+
 # --- UDP (DNS) ---
 
 fn taar_udp_open(): i64 {
-    return syscall(_TAAR_SYS_SOCKET, _TAAR_AF_INET, _TAAR_SOCK_DGRAM, _TAAR_IPPROTO_UDP);
+    return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_DGRAM, _TAAR_IPPROTO_UDP);
 }
 
 fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
     var tv[16];
     store64(&tv, timeout_ms / 1000);
     store64(&tv + 8, (timeout_ms % 1000) * 1000);
-    return syscall(_TAAR_SYS_SETSOCKOPT, fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
+    return sys_setsockopt(fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
 }
 
+# connect(2) the datagram socket to the peer, then write(2).
+#
+# Deliberately connect-then-write rather than sendto(2). Two reasons:
+#   1. Security. A connected UDP socket makes the kernel drop datagrams whose
+#      source address/port is not the peer, so an off-path attacker must guess
+#      the ephemeral source port on top of the 16-bit DNS ID. Unconnected, any
+#      host that guessed the ID alone could land a forged answer (RFC 5452).
+#   2. Portability. The stdlib exposes no sendto wrapper and no SYS_SENDTO
+#      constant, and hardcoding 44 is exactly the aarch64 misroute this module
+#      is fixing (44 is fstatfs there). write(2) on a connected socket needs
+#      neither.
+# Re-connecting a UDP socket to a new peer is legal and cheap, so per-send
+# connect keeps the (fd, addr, port) signature intact. Bytes sent, or <0.
 fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
     var sa[16];
     taar_fill_sockaddr(&sa, packed_addr, port);
-    return syscall(_TAAR_SYS_SENDTO, fd, pkt, pkt_len, 0, &sa, 16);
+    var c = sys_connect(fd, &sa, 16);
+    if (c < 0) { return c; }
+    return sys_write(fd, pkt, pkt_len);
 }
 
 fn taar_udp_recv(fd, buf, maxlen): i64 {
-    return syscall(_TAAR_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
+    return sys_recvfrom(fd, buf, maxlen, 0, 0, 0);
 }
 
 fn taar_udp_close(fd): i64 {
-    return syscall(_TAAR_SYS_CLOSE, fd);
+    return sys_close(fd);
 }
 
 # --- TCP ---
 
 fn taar_tcp_open(): i64 {
-    return syscall(_TAAR_SYS_SOCKET, _TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
+    return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
 }
 
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
     var tv[16];
     store64(&tv, timeout_ms / 1000);
     store64(&tv + 8, (timeout_ms % 1000) * 1000);
-    return syscall(_TAAR_SYS_SETSOCKOPT, fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
+    return sys_setsockopt(fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
 }
 
 fn taar_tcp_connect(fd, packed_addr, port): i64 {
     var sa[16];
     taar_fill_sockaddr(&sa, packed_addr, port);
-    return syscall(_TAAR_SYS_CONNECT, fd, &sa, 16);
+    return sys_connect(fd, &sa, 16);
 }
 
+# write(2). Returns bytes accepted, which may be < len on a partial write —
+# the caller loops. (Unchanged contract; noted because it is easy to miss.)
 fn taar_tcp_send(fd, buf, len): i64 {
-    return syscall(_TAAR_SYS_WRITE, fd, buf, len);
+    return sys_write(fd, buf, len);
 }
 
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
-    return syscall(_TAAR_SYS_READ, fd, buf, maxlen);
+    return sys_read(fd, buf, maxlen);
 }
 
 fn taar_sock_close(fd): i64 {
-    return syscall(_TAAR_SYS_CLOSE, fd);
+    return sys_close(fd);
 }
 
 # --- platform helpers (entropy + file) for dns.cyr ---
 
-# 2 bytes from /dev/urandom for the DNS query ID (RFC 5452). 0x1234 on failure.
+# 2 bytes for the DNS query ID (RFC 5452), via getrandom(2).
+#
+# Was open("/dev/urandom")+read with the read result ignored: a short or
+# failed read left the 2-byte stack buffer UNINITIALISED and its garbage
+# became the query ID — the opposite of the unpredictability RFC 5452 asks
+# for. Now zero-initialised, drawn with getrandom(2) (no fd, no path, and
+# arch-dispatched), and the byte count is checked. Returns -1 if the kernel
+# would not supply entropy; the caller must fail closed rather than resolve
+# with a guessable ID.
 fn _taar_plat_random_u16(): i64 {
     var b[2];
-    var fd = syscall(_TAAR_SYS_OPEN, "/dev/urandom", _TAAR_O_RDONLY, 0);
-    if (fd < 0) { return 0x1234; }
-    syscall(_TAAR_SYS_READ, fd, &b, 2);
-    syscall(_TAAR_SYS_CLOSE, fd);
+    store8(&b, 0);
+    store8(&b + 1, 0);
+    var n = sys_getrandom(&b, 2, 0);
+    if (n != 2) { return 0 - 1; }
     return (load8(&b) << 8) | load8(&b + 1);
 }
 
-# open(path,O_RDONLY)+read+close. Bytes read, or <0. Used for /etc/resolv.conf.
+# openat(AT_FDCWD, path, O_RDONLY) + read + close. Bytes read, or <0.
+# Used for /etc/resolv.conf. openat via the stdlib because bare open(2) is
+# x86_64-only — aarch64 has no SYS_OPEN at all.
 fn _taar_plat_read_file(path, buf, maxlen): i64 {
-    var fd = syscall(_TAAR_SYS_OPEN, path, _TAAR_O_RDONLY, 0);
+    var fd = sys_openat(AT_FDCWD, path, O_RDONLY, 0);
     if (fd < 0) { return fd; }
-    var n = syscall(_TAAR_SYS_READ, fd, buf, maxlen);
-    syscall(_TAAR_SYS_CLOSE, fd);
+    var n = sys_read(fd, buf, maxlen);
+    sys_close(fd);
     return n;
 }
 
@@ -166,18 +209,25 @@ var _taar_ag_src_port   = 0;         # bound UDP source port (for packed-ports)
 var _taar_ag_timeout_ms = 10000;     # recv-poll deadline window (set per-call)
 
 # Draw an ephemeral source port 49152..65535 from hardware entropy (RDRAND).
+# Returns -1 if the kernel would not supply entropy: a source port derived
+# from uninitialised stack is a predictable port, which is precisely the
+# off-path-spoofing hole ephemeral randomisation exists to close.
 fn _taar_ag_ephemeral_port(): i64 {
     var rb[2];
-    sys_getrandom(&rb, 2, 0);
+    store8(&rb, 0);
+    store8(&rb + 1, 0);
+    var n = sys_getrandom(&rb, 2, 0);
+    if (n != 2) { return 0 - 1; }
     return 49152 + (((load8(&rb) << 8) | load8(&rb + 1)) & 0x3FFF);
 }
 
 # --- UDP (DNS) ---
 
 # Bind an ephemeral UDP source port so the reply routes back. Returns the
-# listener_id (0..7) as the "fd", or the kernel's -1 (table full).
+# listener_id (0..7) as the "fd", or <0 (entropy unavailable / table full).
 fn taar_udp_open(): i64 {
     var port = _taar_ag_ephemeral_port();
+    if (port < 0) { return 0 - 1; }
     var lid = sys_udp_bind(port);
     if (lid < 0) { return lid; }
     _taar_ag_src_port = port;
@@ -232,6 +282,7 @@ fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
 # Stashes the conn_id; returns 0 on success or the kernel's negative error.
 fn taar_tcp_connect(fd, packed_addr, port): i64 {
     var sport = _taar_ag_ephemeral_port();
+    if (sport < 0) { return 0 - 1; }
     var conn = sys_sock_connect(packed_addr, port, sport);
     if (conn < 0) { return conn; }
     _taar_ag_conn = conn;
@@ -245,6 +296,13 @@ fn taar_tcp_send(fd, buf, len): i64 {
 
 # Poll sock_recv#49 (>0 data / 0 WOULD_BLOCK / -1 EOF) against the deadline,
 # mapping to the Linux blocking-read sense: >0 data, 0 = peer closed / timeout.
+#
+# CAVEAT (unchanged contract, documented): a deadline expiry is reported as 0,
+# the same value as a clean peer close, so a caller cannot distinguish "the
+# response ended" from "the response stalled". A peer that stalls mid-body can
+# therefore make a truncated read look complete. Fixing this means giving
+# timeout its own negative return, which is a breaking change for whirl's
+# transport — tracked in docs/development/state.md carry-forward.
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
     var deadline = sys_uptime_ms() + _taar_ag_timeout_ms;
     while (sys_uptime_ms() < deadline) {
@@ -266,9 +324,14 @@ fn taar_sock_close(fd): i64 {
 # --- platform helpers (entropy + file) for dns.cyr ---
 
 # 2 bytes of hardware entropy (RDRAND) for the DNS query ID (RFC 5452).
+# -1 if the kernel would not supply it (see the Linux peer: an unchecked
+# draw yields an uninitialised, guessable ID).
 fn _taar_plat_random_u16(): i64 {
     var rb[2];
-    sys_getrandom(&rb, 2, 0);
+    store8(&rb, 0);
+    store8(&rb + 1, 0);
+    var n = sys_getrandom(&rb, 2, 0);
+    if (n != 2) { return 0 - 1; }
     return (load8(&rb) << 8) | load8(&rb + 1);
 }
 
