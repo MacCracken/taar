@@ -4,6 +4,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.35` → `6.6.2`.** No source change — taar has no `Result` /
+  `Option` / `Either` surface, so the 6.6.0 value form does not reach it. Zero
+  compiler rejections, zero fail-open sites, zero `callptr`. **93 assertions** pass.
+
+
 ### Documentation
 Sweep of every doc against the actual tree, and a split of what each file is
 for. Corrections, not rewording — each of these was stated and wrong:

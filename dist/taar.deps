@@ -4,3 +4,4 @@ syscalls
 fmt
 assert
 alloc
+vec
