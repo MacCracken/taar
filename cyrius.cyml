@@ -1,7 +1,7 @@
 [package]
 name = "taar"
 version = "${file:VERSION}"
-description = "तार — wire / string / connection. Network-probe substrate library for AGNOS first-party net tools (yo, dig, whirl): IPv4 address codec today; ICMP / UDP socket primitives + DNS query/response as consumers fold in. Sanskrit/Hindi system-lib naming lane."
+description = "तार — wire / string / connection. Network-probe substrate library for AGNOS first-party net tools (yo, dig, whirl): IPv4 address codec, UDP + TCP socket primitives (Linux + AGNOS), and an A-record stub resolver with TCP fallback. Sanskrit/Hindi system-lib naming lane."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/taar"
 language = "cyrius"
@@ -22,7 +22,12 @@ test = "src/test.cyr"
 modules = ["src/ipv4.cyr", "src/socket.cyr", "src/dns.cyr"]
 
 [deps]
-# ipv4_format_to_buf calls fmt_int_buf (stdlib fmt). Consumers must
-# carry fmt in their own stdlib deps for the dist bundle to resolve —
-# yo and dig already do.
+# taar's own build list. The shipped bundle needs only `syscalls` + `fmt`
+# (ipv4_format_to_buf calls fmt_int_buf); `distlib` compile-verifies that
+# and writes it to dist/taar.deps. `assert` and `alloc` serve the test
+# suite and the smoke programs and never reach consumers.
 stdlib = ["syscalls", "fmt", "assert", "alloc"]
+
+[test]
+# Test / bench / fuzz compiles only — never a build, never the sidecar.
+stdlib = ["bench"]

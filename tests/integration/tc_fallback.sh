@@ -11,22 +11,37 @@
 # namespace where we hold the capability and the port is free. No root, no
 # changes to /etc/resolv.conf.
 #
-#   cyrius build programs/resolve-smoke.cyr build/taar-resolve
-#   tests/integration/tc_fallback.sh
+#   tests/integration/tc_fallback.sh            # builds its own binary
+#   tests/integration/tc_fallback.sh <binary>   # or tests one you built
+#
+# With no argument the script compiles programs/resolve-smoke.cyr from this
+# checkout into a scratch dir on every run. It used to default to a fixed
+# build/taar-resolve path, which kept passing against whatever binary was
+# last left there — including one built months earlier by an older compiler.
+#
+# Every case runs under `timeout`, so a regression that hangs (the connect
+# case below) fails in seconds instead of stalling the run.
 #
 # Runs in CI as the `integration` job, which probes for `unshare -rn` first and
 # warns-and-skips if a runner forbids unprivileged user namespaces.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BIN="${1:-$HERE/../../build/taar-resolve}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+CASE_TIMEOUT=30
 
-[ -x "$BIN" ] || { echo "missing $BIN — build programs/resolve-smoke.cyr first"; exit 2; }
+if [ $# -ge 1 ]; then
+    BIN="$1"
+else
+    BIN="$WORK/taar-resolve"
+    (cd "$HERE/../.." && cyrius build programs/resolve-smoke.cyr "$BIN") >"$WORK/build.log" 2>&1 \
+        || { cat "$WORK/build.log"; echo "could not build programs/resolve-smoke.cyr"; exit 2; }
+fi
+[ -x "$BIN" ] || { echo "missing $BIN"; exit 2; }
 
 run() {
     mode="$1"
-    unshare -rn bash -c "
+    timeout "$CASE_TIMEOUT" unshare -rn bash -c "
         set -u
         ip link set lo up
         python3 '$HERE/fake_dns.py' '$mode' 3>'$WORK/ready.$mode' &
@@ -57,6 +72,7 @@ check "TC=1: retries over TCP"                   tc        10.11.12.13
 check "TC=1 + no TCP: falls back, does not fail" tc_answer 10.0.0.1
 check "TCP declares > client buffer: refused"    tc_huge   10.0.0.1
 check "TCP declares sub-header length: refused"  tc_runt   10.0.0.1
+check "TC=1 + TCP SYNs dropped: connect bounded" tc_blackhole 10.0.0.1
 
 [ $fail -eq 0 ] && echo "all cases passed" || echo "FAILURES"
 exit $fail

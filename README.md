@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.6.1.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.6.2.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -59,7 +59,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.6.1"
+tag = "0.6.2"
 modules = ["dist/taar.cyr"]
 ```
 
@@ -80,9 +80,10 @@ Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.7.18`); run
 `cyrius deps` first to vendor the stdlib into `lib/`.
 
 ```sh
-cyrius audit                                        # fmt + lint + docs + tests
-cyrius test tests/                                  # tests/taar.tcyr — 93 assertions
+cyrius audit                                        # fmt + lint + docs + tests + bench
+cyrius test tests/                                  # tests/taar.tcyr — 140 assertions
 cyrius test --aarch64 tests/                        # same suite on aarch64 (needs qemu-user)
+cyrius bench benches/                               # codec / parser timings
 cyrius build programs/smoke.cyr build/taar-smoke    # compiles + round-trips an address
 cyrius distlib                                      # regenerate dist/taar.cyr + .deps
 ```
@@ -97,7 +98,8 @@ cyrius build programs/tcp-resolve-smoke.cyr build/taar-tcp-resolve    # DNS over
 The DNS truncation path can't be unit-tested — no live resolver truncates on
 demand — so `tests/integration/` stands up a fake resolver that answers
 differently over UDP and TCP, inside `unshare -rn` so it can hold port 53
-without root. This runs in CI:
+without root. It also simulates a TCP/53 that drops SYNs. The script builds
+its own binary from the checkout, and runs in CI:
 
 ```sh
 tests/integration/tc_fallback.sh
@@ -109,7 +111,9 @@ tests/integration/tc_fallback.sh
 - [`docs/development/state.md`](docs/development/state.md) — current snapshot:
   module surface, consumer adoption, what is and isn't verified.
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — forward work
-  and the trigger each planned module waits on.
+  by release (0.7.x – 1.0.0) and the trigger each backlog module waits on.
+- [`docs/audit/`](docs/audit/) — dated P(-1) review reports; the latest is
+  [2026-11-08](docs/audit/2026-11-08-audit.md).
 - [`CLAUDE.md`](CLAUDE.md) — durable conventions and the work loop.
 
 ## License

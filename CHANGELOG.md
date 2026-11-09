@@ -4,6 +4,87 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-08
+
+A P(-1) review of everything taar ships: 17 findings, none critical or high, all
+fixed. The full report, with method, evidence and the ten deferred items, is
+[`docs/audit/2026-11-08-audit.md`](docs/audit/2026-11-08-audit.md).
+
+### Security
+
+- **No silent public-resolver fallback.** A resolv.conf naming only resolvers
+  taar cannot use (IPv6, `0.0.0.0`) used to send every lookup to 8.8.8.8,
+  bypassing the host's chosen resolver. Now the resolve fails closed. So does a
+  resolv.conf over 4 KB whose usable line was cut at the buffer edge, which
+  could otherwise yield a valid but wrong address. A missing file, or one naming
+  no nameserver, still falls back.
+- **AGNOS drops UDP replies from anyone but the nameserver.** The agnos kernel
+  matches the destination port only, so a forger needed no address spoofing.
+  `taar_udp_send` now records the peer and `taar_udp_recv` filters on it, as
+  Linux's connected socket does. The match logic is unit-tested; the wiring is
+  compile-only until AGNOS execution exists (roadmap 0.7.0).
+- **Only class-IN A records are taken as addresses.**
+
+### Changed
+
+- **`taar_tcp_set_timeout_ms` also bounds connect and send (Linux).** It sets
+  `SO_SNDTIMEO` as well as `SO_RCVTIMEO`. Before, a connect to a host whose
+  SYNs were dropped waited out about 127 s of SYN retries whatever timeout was
+  set. That applied to the DNS TCP retry and to whirl's 10 s HTTP connects. A
+  timed-out connect fails -EINPROGRESS, and a send that writes nothing returns
+  `_TAAR_ERR_TIMEOUT`.
+- **The DNS TCP retry is bounded in reads (16) and zero-progress sends (1).**
+  This caps a slow-drip peer, which before could take hours, and an AGNOS
+  stall, which before could take about 8.5 minutes.
+- **AGNOS parity.**
+  - Timeout 0 means "no deadline", as on Linux; it used to expire at once.
+  - The recv loops poll at least once.
+  - A negative timeout is refused.
+  - `taar_udp_send` returns the payload count, not the frame length.
+- **resolv.conf parsing.** CRLF files parse, and a `0.0.0.0` entry no longer
+  hides the servers after it.
+- Both `set_timeout` results in `dns.cyr` are checked, so the resolve fails
+  closed rather than blocking without a deadline.
+
+### Tests
+
+- Unit suite 93 → **140** assertions, in eight new groups. They cover the
+  resolv.conf parser (previously untested), the resolver choice, name-length
+  limits (with a canary proving the in-loop check stops the write), answer
+  class, the read cap, the send timeout, the AGNOS deadline and peer helpers,
+  and the compression loop only the hop budget stops. All 18 new guards were
+  mutation-checked.
+- Integration: a sixth case, `tc_blackhole` (a TCP/53 that drops SYNs). The
+  script now builds its own binary on every run and runs each case under a
+  timeout. It used to test whatever was left in `build/`, which locally was a
+  binary from 2026-08-26. So the local integration results reported for 0.5.2,
+  0.6.0 and 0.6.1 did not test those toolchains. A fresh build passes.
+- **Benchmarks**: `benches/codec.bcyr`, eight rows over the per-resolve CPU
+  paths, with `bench` as a `[test] stdlib` leaf. A baseline was taken before
+  the repairs; the repairs cost about 30 ns per resolve. No optimisation was
+  warranted.
+
+### CI
+
+- `cyrius distlib --check` is a hard gate (a stale bundle only warned before).
+- The security job enforces the no-syscall-literal rule. It used to grep for
+  `/etc/`, always warn, and never fail.
+- Supply chain: `actions/checkout` and `softprops/action-gh-release` are
+  SHA-pinned, and the cyrius installer is fetched at the pinned tag rather than
+  `main`. The token is read-only except in the release job.
+- Lint and doc gates cover `benches/`; benches compile and run in CI.
+
+### Documentation
+
+- `roadmap.md` is reorganised into 0.7.x (AGNOS executed), 0.8.x (resolver
+  completeness), 0.9.x (surface freeze), 1.0.0 criteria and a trigger-gated v1
+  backlog. A closed item and a stale stdlib claim were dropped.
+- Comments the code had outgrown are corrected (listed in the report, finding
+  P). The "check the consumer before parking" lesson moved from state.md to
+  CLAUDE.md, which also gains the `docs/audit/` convention.
+- The bundle uses no 6.7 language feature: it still builds, and resolves live,
+  under the consumers' cyrius 6.6.2.
+
 ## [0.6.1] - 2026-11-08
 
 ### Changed

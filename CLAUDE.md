@@ -78,6 +78,11 @@ New guards get a test, and the test gets **mutation-checked** — remove the
 guard, confirm the suite goes red. A guard whose removal changes nothing is
 either redundant (say so in a comment) or untested.
 
+**Check the consumer before parking an item as "breaking".** The AGNOS
+`taar_tcp_recv` fix sat parked for two releases on the belief it would break
+`whirl`; reading whirl's call sites showed it could not. Verify the claim
+before it becomes a blocker.
+
 ## Documentation split
 
 Four files, one job each. When a fact belongs in two, keep it in the more
@@ -89,6 +94,10 @@ durable one and delete the copy.
 - `docs/development/state.md` — a snapshot of what is true now.
 - `docs/development/roadmap.md` — forward-looking only; each planned item names
   the trigger it waits on.
+
+Plus dated P(-1) review reports, `docs/audit/<date>-audit.md`: findings,
+method and evidence for one review, immutable once filed. CHANGELOG links to
+the report rather than repeating it.
 
 ## DO NOT
 

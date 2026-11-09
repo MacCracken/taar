@@ -51,7 +51,8 @@ var _TAAR_SOCK_DGRAM  = 2;
 var _TAAR_IPPROTO_TCP = 6;
 var _TAAR_IPPROTO_UDP = 17;
 var _TAAR_SOL_SOCKET  = 1;
-var _TAAR_SO_RCVTIMEO = 20;
+var _TAAR_SO_RCVTIMEO = 20;   # asm-generic, so x86_64 and aarch64 agree
+var _TAAR_SO_SNDTIMEO = 21;
 
 # Receive-deadline expiry, returned by both recv paths on both backends.
 # -11 is Linux's -EAGAIN, which is literally what a SO_RCVTIMEO expiry yields
@@ -79,6 +80,50 @@ fn taar_fill_sockaddr(sa, packed_addr, port): i64 {
     return 0;
 }
 
+# 2 random bytes as a u16 — the DNS query ID (RFC 5452), and on AGNOS the
+# ephemeral source port. getrandom(2) on Linux, RDRAND-backed getrandom#45 on
+# AGNOS; the wrapper has the same shape on both, so this lives once, here.
+#
+# The buffer is zeroed and the byte count checked: an unchecked draw once left
+# it uninitialised, and stack garbage became the query ID — the opposite of the
+# unpredictability the ID exists for. Returns -1 if the kernel would not supply
+# entropy; callers must fail closed rather than proceed with a guessable value.
+fn _taar_plat_random_u16(): i64 {
+    var b[2];
+    store8(&b, 0);
+    store8(&b + 1, 0);
+    var n = sys_getrandom(&b, 2, 0);
+    if (n != 2) { return 0 - 1; }
+    return (load8(&b) << 8) | load8(&b + 1);
+}
+
+# Deadline for a poll loop starting at `now` (ms) with a `timeout_ms` budget, or
+# -1 for none. 0 means "no deadline", as SO_RCVTIMEO's 0 means "block
+# indefinitely" on Linux. Pure, so the suite tests it on any host; only the
+# AGNOS arm polls.
+fn _taar_poll_deadline(now, timeout_ms): i64 {
+    if (timeout_ms <= 0) { return 0 - 1; }
+    return now + timeout_ms;
+}
+
+# 1 once `now` has reached `deadline`; never for the no-deadline value -1.
+fn _taar_poll_expired(now, deadline): i64 {
+    if (deadline < 0) { return 0; }
+    if (now >= deadline) { return 1; }
+    return 0;
+}
+
+# Did a datagram come from the peer we sent to? `from` is the 16-byte record the
+# AGNOS udp_recv#53 kernel fills (source ip @+0 in the packed first-octet-high
+# form, source port @+8). A zero `peer_port` means nothing has been sent yet,
+# which, like an unconnected socket, accepts any sender. 1 = accept, 0 = drop.
+fn _taar_peer_match(from, peer_ip, peer_port): i64 {
+    if (peer_port == 0) { return 1; }
+    if (load64(from) != peer_ip) { return 0; }
+    if (load64(from + 8) != peer_port) { return 0; }
+    return 1;
+}
+
 #ifndef CYRIUS_TARGET_AGNOS
 # ===================================================================
 # POSIX/Linux backend — socket(2) family via arch-dispatched sys_* wrappers.
@@ -92,14 +137,21 @@ fn taar_udp_open(): i64 {
     return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_DGRAM, _TAAR_IPPROTO_UDP);
 }
 
-# Bound how long a single taar_udp_recv will block, via SO_RCVTIMEO. A expiry
-# then surfaces as _TAAR_ERR_TIMEOUT. 0 means block indefinitely. Returns 0, or
-# a negative errno.
-fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
+# Set SO_RCVTIMEO or SO_SNDTIMEO (`optname`) to `timeout_ms`, as the struct
+# timeval {tv_sec, tv_usec} both take. 0 = no limit. Returns 0, or a negative
+# errno (a negative timeout is refused by the kernel with -EDOM).
+fn _taar_set_sock_timeout(fd, optname, timeout_ms): i64 {
     var tv[16];
     store64(&tv, timeout_ms / 1000);
     store64(&tv + 8, (timeout_ms % 1000) * 1000);
-    return sys_setsockopt(fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
+    return sys_setsockopt(fd, _TAAR_SOL_SOCKET, optname, &tv, 16);
+}
+
+# Bound how long a single taar_udp_recv will block, via SO_RCVTIMEO. An expiry
+# then surfaces as _TAAR_ERR_TIMEOUT. 0 means block indefinitely. Returns 0, or
+# a negative errno.
+fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
+    return _taar_set_sock_timeout(fd, _TAAR_SO_RCVTIMEO, timeout_ms);
 }
 
 # connect(2) the datagram socket to the peer, then write(2).
@@ -145,14 +197,25 @@ fn taar_tcp_open(): i64 {
     return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
 }
 
-# Bound how long a single taar_tcp_recv will block, via SO_RCVTIMEO. An expiry
-# then surfaces as _TAAR_ERR_TIMEOUT, distinct from the 0 that means the peer
-# closed. 0 means block indefinitely. Returns 0, or a negative errno.
+# Bound how long a single connect, send or recv on this socket will block.
+# 0 means block indefinitely. Returns 0, or a negative errno. Call it before
+# taar_tcp_connect for the connect to be bounded.
+#
+#   - recv (SO_RCVTIMEO): an expiry is _TAAR_ERR_TIMEOUT, distinct from the 0
+#     that means the peer closed.
+#   - send (SO_SNDTIMEO): a send that cannot write anything before the deadline
+#     is _TAAR_ERR_TIMEOUT; one that wrote some bytes returns that count.
+#   - connect (also SO_SNDTIMEO): a handshake that does not finish in time
+#     fails with -EINPROGRESS.
+#
+# Until 0.6.2 this set SO_RCVTIMEO only, and Linux bounds connect(2) by
+# SO_SNDTIMEO, so a connect to a host whose SYNs were dropped (a filtered port)
+# waited out the kernel's SYN retries, about 127 s, whatever timeout the caller
+# had asked for.
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
-    var tv[16];
-    store64(&tv, timeout_ms / 1000);
-    store64(&tv + 8, (timeout_ms % 1000) * 1000);
-    return sys_setsockopt(fd, _TAAR_SOL_SOCKET, _TAAR_SO_RCVTIMEO, &tv, 16);
+    var r = _taar_set_sock_timeout(fd, _TAAR_SO_RCVTIMEO, timeout_ms);
+    if (r < 0) { return r; }
+    return _taar_set_sock_timeout(fd, _TAAR_SO_SNDTIMEO, timeout_ms);
 }
 
 # Connect to packed_addr:port. Blocks until the handshake completes, fails, or
@@ -182,25 +245,8 @@ fn taar_sock_close(fd): i64 {
     return sys_close(fd);
 }
 
-# --- platform helpers (entropy + file) for dns.cyr ---
-
-# 2 bytes for the DNS query ID (RFC 5452), via getrandom(2).
-#
-# Was open("/dev/urandom")+read with the read result ignored: a short or
-# failed read left the 2-byte stack buffer UNINITIALISED and its garbage
-# became the query ID — the opposite of the unpredictability RFC 5452 asks
-# for. Now zero-initialised, drawn with getrandom(2) (no fd, no path, and
-# arch-dispatched), and the byte count is checked. Returns -1 if the kernel
-# would not supply entropy; the caller must fail closed rather than resolve
-# with a guessable ID.
-fn _taar_plat_random_u16(): i64 {
-    var b[2];
-    store8(&b, 0);
-    store8(&b + 1, 0);
-    var n = sys_getrandom(&b, 2, 0);
-    if (n != 2) { return 0 - 1; }
-    return (load8(&b) << 8) | load8(&b + 1);
-}
+# --- platform helpers (file + resolver lease) for dns.cyr ---
+# (_taar_plat_random_u16 is shared; it sits above both arms.)
 
 # openat(AT_FDCWD, path, O_RDONLY) + read + close. Bytes read, or <0.
 # Used for /etc/resolv.conf. openat via the stdlib because bare open(2) is
@@ -232,23 +278,34 @@ fn _taar_plat_dns_server(): i64 { return 0; }
 #      the result back to the Linux blocking-read sense its callers expect
 #      (>0 data, 0 = peer closed).
 #   3. src ports are drawn from getrandom#45 (49152..65535 ephemeral range).
+#   4. A UDP listener is not "connected": the kernel delivers any datagram
+#      addressed to its port, whoever sent it (net_handle_udp matches the
+#      destination port only). taar_udp_send records the peer and
+#      taar_udp_recv drops anything else, which is what connect(2) makes the
+#      Linux kernel do. Without it an off-path forger needs no source-address
+#      spoofing at all, only the port and the query ID.
+#
+# ⚠ State is module-global, not per socket: one timeout, one TCP conn, one UDP
+# peer. taar is single-connection-at-a-time here, so a consumer that holds a
+# TCP connection open across a taar_resolve_ipv4 call can have it disturbed by
+# the resolver's TC retry. Per-socket state is a roadmap item; it lands with
+# executed AGNOS coverage, since nothing runs this arm yet.
 # ===================================================================
 
 var _taar_ag_conn       = 0 - 1;     # active TCP conn_id (0..7), -1 = none
 var _taar_ag_src_port   = 0;         # bound UDP source port (for packed-ports)
 var _taar_ag_timeout_ms = 10000;     # recv-poll deadline window (set per-call)
+var _taar_ag_peer_ip    = 0;         # UDP peer recorded by taar_udp_send
+var _taar_ag_peer_port  = 0;         # 0 = none yet (accept any sender)
 
 # Draw an ephemeral source port 49152..65535 from hardware entropy (RDRAND).
 # Returns -1 if the kernel would not supply entropy: a source port derived
 # from uninitialised stack is a predictable port, which is precisely the
 # off-path-spoofing hole ephemeral randomisation exists to close.
 fn _taar_ag_ephemeral_port(): i64 {
-    var rb[2];
-    store8(&rb, 0);
-    store8(&rb + 1, 0);
-    var n = sys_getrandom(&rb, 2, 0);
-    if (n != 2) { return 0 - 1; }
-    return 49152 + (((load8(&rb) << 8) | load8(&rb + 1)) & 0x3FFF);
+    var r = _taar_plat_random_u16();
+    if (r < 0) { return 0 - 1; }
+    return 49152 + (r & 0x3FFF);
 }
 
 # --- UDP (DNS) ---
@@ -261,32 +318,53 @@ fn taar_udp_open(): i64 {
     var lid = sys_udp_bind(port);
     if (lid < 0) { return lid; }
     _taar_ag_src_port = port;
+    _taar_ag_peer_ip = 0;
+    _taar_ag_peer_port = 0;
     return lid;
 }
 
 # No SO_RCVTIMEO on AGNOS — remember the timeout for the recv poll loop.
+# 0 = no deadline, as on Linux. Returns 0, or -1 for a negative timeout (Linux
+# refuses one too).
 fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
+    if (timeout_ms < 0) { return 0 - 1; }
     _taar_ag_timeout_ms = timeout_ms;
     return 0;
 }
 
 # udp_send(dst_ip, (src_port<<16)|dst_port, pkt, len). packed_addr is the ip4()
-# packed form (high byte = first octet) the kernel expects. Bytes sent / -1.
+# packed form (high byte = first octet) the kernel expects. Records the peer so
+# taar_udp_recv can drop other senders (see note 4 above). Returns pkt_len on
+# success, as Linux write(2) does: the kernel reports the frame length
+# (payload + 42 bytes of headers), which a caller comparing against pkt_len
+# would misread. -1 on failure.
 fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
-    var packed_ports = (_taar_ag_src_port << 16) | (port & 0xFFFF);
-    return sys_udp_send(packed_addr, packed_ports, pkt, pkt_len);
+    _taar_ag_peer_ip = packed_addr;
+    _taar_ag_peer_port = port & 0xFFFF;
+    var packed_ports = (_taar_ag_src_port << 16) | _taar_ag_peer_port;
+    var r = sys_udp_send(packed_addr, packed_ports, pkt, pkt_len);
+    if (r > 0) { return pkt_len; }
+    return r;
 }
 
 # Non-blocking kernel recv polled against an uptime_ms deadline. Returns bytes
 # received (>0), _TAAR_ERR_TIMEOUT on deadline expiry (matching what Linux
-# SO_RCVTIMEO yields), or a kernel error (<0). The 5ms inter-poll sleep keeps
-# us off a busy-spin.
+# SO_RCVTIMEO yields), or a kernel error (<0). Polls at least once, so a reply
+# already waiting is returned even with a short deadline. A datagram from any
+# host but the peer taar_udp_send recorded is dropped and the wait continues.
+# The 5ms inter-poll sleep keeps us off a busy-spin.
 fn taar_udp_recv(fd, buf, maxlen): i64 {
-    var deadline = sys_uptime_ms() + _taar_ag_timeout_ms;
-    while (sys_uptime_ms() < deadline) {
-        var n = sys_udp_recv(fd, buf, maxlen, 0);
-        if (n > 0) { return n; }
+    var deadline = _taar_poll_deadline(sys_uptime_ms(), _taar_ag_timeout_ms);
+    var from[16];
+    while (1) {
+        store64(&from, 0);
+        store64(&from + 8, 0);
+        var n = sys_udp_recv(fd, buf, maxlen, &from);
         if (n < 0) { return n; }
+        if (n > 0) {
+            if (_taar_peer_match(&from, _taar_ag_peer_ip, _taar_ag_peer_port) == 1) { return n; }
+        }
+        if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return _TAAR_ERR_TIMEOUT; }
         sys_sleep_ms(5);
     }
     return _TAAR_ERR_TIMEOUT;
@@ -307,8 +385,10 @@ fn taar_tcp_open(): i64 {
 }
 
 # No SO_RCVTIMEO on AGNOS — remember the deadline window for the recv poll
-# loop. Always returns 0.
+# loop. 0 = no deadline. Returns 0, or -1 for a negative timeout. Bounds recv
+# only: sock_connect#47 and sock_send#48 carry their own ~8 s kernel windows.
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
+    if (timeout_ms < 0) { return 0 - 1; }
     _taar_ag_timeout_ms = timeout_ms;
     return 0;
 }
@@ -331,7 +411,13 @@ fn taar_tcp_send(fd, buf, len): i64 {
 
 # Poll sock_recv#49 (>0 data / 0 WOULD_BLOCK / -1 EOF) against the deadline,
 # mapping to the Linux blocking-read sense. Returns bytes read (>0), 0 when the
-# peer closed cleanly, or _TAAR_ERR_TIMEOUT on deadline expiry.
+# peer closed cleanly, or _TAAR_ERR_TIMEOUT on deadline expiry. Polls at least
+# once.
+#
+# ⚠ The kernel answers -1 for EOF AND for a reset or dead connection, so both
+# read as 0 here, where Linux returns -ECONNRESET for the second. taar cannot
+# tell them apart until sock_recv#49 does; a consumer reading to EOF on AGNOS
+# can mistake a mid-body reset for a complete response. Tracked in the roadmap.
 #
 # Through 0.4.0 a deadline expiry also returned 0 — indistinguishable from a
 # clean close, so a peer that stalled mid-body made a truncated read look like
@@ -341,11 +427,12 @@ fn taar_tcp_send(fd, buf, len): i64 {
 # already returned -11 on timeout. The AGNOS TCP path was the only place the
 # two collapsed, against a module contract that promises an identical surface.
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
-    var deadline = sys_uptime_ms() + _taar_ag_timeout_ms;
-    while (sys_uptime_ms() < deadline) {
+    var deadline = _taar_poll_deadline(sys_uptime_ms(), _taar_ag_timeout_ms);
+    while (1) {
         var n = sys_sock_recv(_taar_ag_conn, buf, maxlen);
         if (n > 0) { return n; }
-        if (n < 0) { return 0; }        # -1 = EOF → "peer closed"
+        if (n < 0) { return 0; }        # -1 = EOF → "peer closed" (see ⚠ above)
+        if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return _TAAR_ERR_TIMEOUT; }
         sys_sleep_ms(2);                # 0 = WOULD_BLOCK → keep polling
     }
     return _TAAR_ERR_TIMEOUT;
@@ -361,19 +448,8 @@ fn taar_sock_close(fd): i64 {
     return r;
 }
 
-# --- platform helpers (entropy + file) for dns.cyr ---
-
-# 2 bytes of hardware entropy (RDRAND) for the DNS query ID (RFC 5452).
-# -1 if the kernel would not supply it (see the Linux peer: an unchecked
-# draw yields an uninitialised, guessable ID).
-fn _taar_plat_random_u16(): i64 {
-    var rb[2];
-    store8(&rb, 0);
-    store8(&rb + 1, 0);
-    var n = sys_getrandom(&rb, 2, 0);
-    if (n != 2) { return 0 - 1; }
-    return (load8(&rb) << 8) | load8(&rb + 1);
-}
+# --- platform helpers (file + resolver lease) for dns.cyr ---
+# (_taar_plat_random_u16 is shared; it sits above both arms.)
 
 # open(name,namelen,O_RDONLY)+read+close via the AGNOS FS syscalls. AGNOS
 # sys_open takes (name, namelen, flags) — compute the cstring length inline.

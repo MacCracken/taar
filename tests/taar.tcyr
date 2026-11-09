@@ -1,9 +1,9 @@
-# taar test suite — pure-code coverage of the substrate surface.
+# taar test suite — the substrate surface, offline.
 #
-# Stdlib auto-included via cyrius.cyml. Network paths (UDP/ICMP
-# send/recv) are exercised by the real consumer binaries (yo, dig)
-# rather than this suite — too much variance vs. a live host to make
-# for reliable CI. Pure codecs live here.
+# Stdlib auto-included via cyrius.cyml. Pure codecs and parsers are driven
+# directly; socket contracts that need a peer use an AF_UNIX socketpair, never
+# the network. What needs a resolver — the TC retry, a filtered TCP/53 — lives
+# in tests/integration/tc_fallback.sh, inside a private network namespace.
 
 include "src/ipv4.cyr"
 include "src/socket.cyr"
@@ -196,6 +196,11 @@ fn test_dns_hostile() {
     # Label that runs off the end of the buffer.
     store8(m + 12, 60);
     assert_eq(_taar_dns_skip_name(m, 20, 12), 0, "label past end refused");
+    # Every pointer here goes backward, so only the hop budget stops it: the
+    # label at 12 walks forward to 14, whose pointer jumps back to 12, forever.
+    store8(m + 12, 1); store8(m + 13, 97);
+    store8(m + 14, 0xC0); store8(m + 15, 12);
+    assert_eq(_taar_dns_skip_name(m, 64, 14), 0, "label + back-pointer loop refused");
 
     # An A record whose rdlength claims more bytes than the message holds.
     var b = alloc(128);
@@ -322,6 +327,241 @@ fn test_socket_recv_contract() {
     return 0;
 }
 
+# Copy a NUL-terminated literal into `dst` (no terminator written). Returns
+# its length — resolv.conf text is parsed by (buf, len), as it comes off disk.
+fn _t_put(dst, s): i64 {
+    var i = 0;
+    while (load8(s + i) != 0) { store8(dst + i, load8(s + i)); i = i + 1; }
+    return i;
+}
+
+# === resolv.conf: the parser sees file contents DHCP clients write ===
+fn test_resolv_parse() {
+    test_group("resolv-parse");
+    var b = alloc(512);
+    var n = _t_put(b, "nameserver 192.168.1.1\n");
+    assert_eq(_taar_resolv_parse(b, n), 0xC0A80101, "plain nameserver");
+    n = _t_put(b, "# managed\n; legacy comment\nsearch lan\n\n  \tnameserver\t10.0.0.53  # trailing\n");
+    assert_eq(_taar_resolv_parse(b, n), 0x0A000035, "comments, blank line, tab separator");
+    n = _t_put(b, "nameserver 1.1.1.1");
+    assert_eq(_taar_resolv_parse(b, n), 0x01010101, "no trailing newline");
+    n = _t_put(b, "nameserver 9.9.9.9\nnameserver 1.1.1.1\n");
+    assert_eq(_taar_resolv_parse(b, n), 0x09090909, "first nameserver wins");
+    n = _t_put(b, "nameserver ::1\nnameserver 192.0.2.7\n");
+    assert_eq(_taar_resolv_parse(b, n), 0xC0000207, "IPv6 entry skipped for a later IPv4");
+    # CRLF files (written on, or copied from, Windows) end each token with a CR.
+    n = _t_put(b, "nameserver 1.2.3.4\r\n");
+    assert_eq(_taar_resolv_parse(b, n), 0x01020304, "CRLF line ending");
+    # 0.0.0.0 used to stop the scan as "found" and then read as "none".
+    n = _t_put(b, "nameserver 0.0.0.0\nnameserver 192.0.2.9\n");
+    assert_eq(_taar_resolv_parse(b, n), 0xC0000209, "0.0.0.0 skipped for a later server");
+    # The keyword must be a whole word.
+    n = _t_put(b, "nameservers 8.8.4.4\n");
+    assert_eq(_taar_resolv_parse(b, n), 0, "nameserverS is not the keyword");
+    # 0 = the file names no nameserver at all.
+    n = _t_put(b, "search lan\noptions edns0\n");
+    assert_eq(_taar_resolv_parse(b, n), 0, "no nameserver line");
+    assert_eq(_taar_resolv_parse(b, 0), 0, "empty file");
+    n = _t_put(b, "nameserver\n");
+    assert_eq(_taar_resolv_parse(b, n), 0, "keyword with no address is not an entry");
+    # -1 = it names nameservers, none of them usable over IPv4. Distinct from 0,
+    # because the caller must not treat a configured resolver as a missing one.
+    n = _t_put(b, "nameserver ::1\nnameserver fe80::1%eth0\n");
+    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "IPv6-only file is configured, not empty");
+    n = _t_put(b, "nameserver 0.0.0.0\n");
+    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "0.0.0.0 is not a usable server");
+    n = _t_put(b, "nameserver 10.0.0.256\n");
+    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "malformed address is not usable");
+    n = _t_put(b, "nameserver 1111111111111111111111111111111111111111111111111111111111111111111\n");
+    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "over-long token refused, not copied");
+    return 0;
+}
+
+# === resolv: the discovery decision (kernel lease -> file -> fallback) ===
+fn test_resolv_choose() {
+    test_group("resolv-choose");
+    var b = alloc(512);
+    var n = _t_put(b, "nameserver 192.168.1.1\n");
+    assert_eq(_taar_resolv_choose(0x0A000001, b, n, 512), 0x0A000001, "kernel-leased server wins");
+    assert_eq(_taar_resolv_choose(0, b, n, 512), 0xC0A80101, "file server used");
+    assert_eq(_taar_resolv_choose(0, b, 0 - 2, 512), _TAAR_RESOLV_FALLBACK, "no file: public fallback");
+    n = _t_put(b, "search lan\n");
+    assert_eq(_taar_resolv_choose(0, b, n, 512), _TAAR_RESOLV_FALLBACK, "no nameserver: public fallback");
+    # A host whose resolv.conf names only IPv6 resolvers has a DNS config taar
+    # cannot use. Sending its lookups to 8.8.8.8 instead would bypass the
+    # resolver the host chose (VPN, split-horizon, filtering) and disclose every
+    # hostname to a third party. Fail closed.
+    n = _t_put(b, "nameserver ::1\n");
+    assert_eq(_taar_resolv_choose(0, b, n, 512), 0, "IPv6-only: fail closed, no public fallback");
+    # A read that filled the buffer may have cut the last line mid-address:
+    # "nameserver 10.0.0.12" read as "nameserver 10.0.0.1" is a valid but WRONG
+    # server. The partial line is dropped and, with nothing complete left, the
+    # resolve fails closed rather than guessing.
+    n = _t_put(b, "# big file\nnameserver 10.0.0.12\n");
+    var cut = n - 2;                               # ends "...10.0.0.1"
+    assert_eq(_taar_resolv_choose(0, b, cut, cut), 0, "cut nameserver line: not used, fail closed");
+    n = _t_put(b, "nameserver 172.16.0.1\nnameserver 10.0.0.12\n");
+    cut = n - 2;
+    assert_eq(_taar_resolv_choose(0, b, cut, cut), 0xAC100001, "complete line before the cut still used");
+    return 0;
+}
+
+# === dns: RFC 1035 2.3.4 size limits on the name we send ===
+fn test_dns_encode_bounds() {
+    test_group("dns-encode-bounds");
+    var name = alloc(400);
+    var out = alloc(400);
+    var i = 0;
+    while (i < 63) { store8(name + i, 97); i = i + 1; }
+    store8(name + 63, 0);
+    assert_eq(_taar_dns_encode_name(name, out), 65, "63-byte label accepted");
+    store8(name + 63, 97); store8(name + 64, 0);
+    assert_eq(_taar_dns_encode_name(name, out), 0, "64-byte label refused");
+    # 63.63.63.61 = 253 characters = a 255-octet wire name, the maximum.
+    var p = 0;
+    var lab = 0;
+    while (lab < 4) {
+        var w = 63;
+        if (lab == 3) { w = 61; }
+        var k = 0;
+        while (k < w) { store8(name + p, 98); p = p + 1; k = k + 1; }
+        if (lab < 3) { store8(name + p, 46); p = p + 1; }
+        lab = lab + 1;
+    }
+    store8(name + p, 0);
+    assert_eq(p, 253, "test name is 253 characters");
+    assert_eq(_taar_dns_encode_name(name, out), 255, "255-octet wire name accepted");
+    store8(name + p, 98); store8(name + p + 1, 0);
+    assert_eq(_taar_dns_encode_name(name, out), 0, "256-octet wire name refused");
+    # Memory safety, not just the verdict: the end-of-name length check alone
+    # would also return 0 for a 390-character name, after writing all of it.
+    # The in-loop check must stop the copy at 256 bytes — in taar_resolve_ipv4
+    # `out` is qbuf + 12 inside a 300-byte stack buffer.
+    var big = alloc(400);
+    i = 0;
+    while (i < 390) { store8(big + i, 99); i = i + 1; }
+    store8(big + 390, 0);
+    var canary = alloc(512);
+    i = 0;
+    while (i < 512) { store8(canary + i, 0xA5); i = i + 1; }
+    assert_eq(_taar_dns_encode_name(big, canary), 0, "390-character name refused");
+    var clean = 1;
+    i = 257;
+    while (i < 512) { if (load8(canary + i) != 0xA5) { clean = 0; } i = i + 1; }
+    assert_eq(clean, 1, "refused name wrote nothing past 257 bytes");
+    return 0;
+}
+
+# === dns: only class-IN A records answer an IN question ===
+fn test_dns_answer_class() {
+    test_group("dns-answer-class");
+    var b = alloc(128);
+    var len = _canned_a_response(b);
+    assert_eq(_taar_dns_first_a(b, len), 0x5DB8D822, "class IN A accepted");
+    # The answer's class word sits 6 bytes before its rdata's TTL+rdlength:
+    # [type 2][class 2][ttl 4][rdlength 2][rdata 4] ends the message.
+    _taar_dns_store_u16(b, len - 12, 3);          # CH (chaos)
+    assert_eq(_taar_dns_first_a(b, len), 0 - 1, "class CH A record not taken as an address");
+    return 0;
+}
+
+# === dns: the TCP read loop is bounded in passes, not just bytes ===
+#
+# SOCK_SEQPACKET keeps message boundaries, so each read returns one record —
+# a deterministic stand-in for a peer that drips its reply a byte at a time.
+# Without a pass cap a 2 KB reply could take 2,048 reads, each allowed the full
+# receive timeout.
+fn test_dns_tcp_read_cap() {
+    test_group("dns-tcp-read-cap");
+    var fds[16];
+    store64(&fds, 0);
+    assert_eq(sys_socketpair(1, 5, 0, &fds), 0, "seqpacket socketpair available");   # AF_UNIX, SOCK_SEQPACKET
+    var a = load32(&fds);
+    var c = load32(&fds + 4);
+    taar_tcp_set_timeout_ms(a, 200);
+    var one[8];
+    store8(&one, 65);
+    var i = 0;
+    while (i < 40) { sys_write(c, &one, 1); i = i + 1; }
+    var buf[64];
+    var got = _taar_dns_tcp_read_all(a, &buf, 40);
+    assert_eq(got, _TAAR_DNS_TCP_MAX_READS, "byte-at-a-time peer stops at the pass cap");
+    # A reply that arrives in one piece is unaffected.
+    var drain = 0;
+    while (drain < 40) { if (sys_read(a, &buf, 64) <= 0) { break; } drain = drain + 1; }
+    var whole[64];
+    i = 0;
+    while (i < 40) { store8(&whole + i, 66); i = i + 1; }
+    sys_write(c, &whole, 40);
+    assert_eq(_taar_dns_tcp_read_all(a, &buf, 40), 40, "whole reply read in one pass");
+    sys_close(a);
+    sys_close(c);
+    return 0;
+}
+
+# === socket: taar_tcp_set_timeout_ms also bounds blocking sends (and connect) ===
+#
+# On Linux SO_RCVTIMEO bounds only reads; connect(2) and write(2) honour
+# SO_SNDTIMEO. Without it, a TCP retry to a resolver whose TCP/53 is filtered
+# sat in connect for the kernel's ~127 s of SYN retries
+# (tests/integration/tc_fallback.sh, tc_blackhole). The connect half needs a
+# network to prove; the send half is provable here: fill a socketpair until a
+# write must block, and check it comes back at the deadline. Unfixed, this
+# write blocks forever and the runner's per-test timeout reports it.
+fn test_socket_send_timeout() {
+    test_group("socket-send-timeout");
+    var fds[16];
+    store64(&fds, 0);
+    assert_eq(sys_socketpair(1, 1, 0, &fds), 0, "socketpair available");
+    var a = load32(&fds);
+    var c = load32(&fds + 4);
+    assert_eq(taar_tcp_set_timeout_ms(a, 200), 0, "timeout set");
+    var chunk = alloc(65536);
+    var n = 1;
+    var i = 0;
+    while (i < 1024) {
+        n = taar_tcp_send(a, chunk, 65536);
+        if (n < 0) { break; }
+        i = i + 1;
+    }
+    assert_eq(n, _TAAR_ERR_TIMEOUT, "a send into a full buffer returns at the deadline");
+    sys_close(a);
+    sys_close(c);
+    return 0;
+}
+
+# === socket: AGNOS poll-loop deadline arithmetic (pure, so testable here) ===
+#
+# AGNOS has no SO_RCVTIMEO, so its recv paths poll against these. 0 must mean
+# "no deadline", as it does for SO_RCVTIMEO on Linux; it used to mean "already
+# expired", so a caller asking to block indefinitely got an instant timeout.
+fn test_poll_deadline() {
+    test_group("poll-deadline");
+    assert_eq(_taar_poll_deadline(1000, 50), 1050, "deadline = now + timeout");
+    assert_eq(_taar_poll_deadline(1000, 0), 0 - 1, "0 = no deadline");
+    assert_eq(_taar_poll_expired(1049, 1050), 0, "before the deadline");
+    assert_eq(_taar_poll_expired(1050, 1050), 1, "at the deadline");
+    assert_eq(_taar_poll_expired(999999999, 0 - 1), 0, "no deadline never expires");
+    return 0;
+}
+
+# === socket: AGNOS reply-source filter (pure; the kernel's addr_out layout) ===
+#
+# AGNOS UDP listeners are unconnected: the kernel hands over any datagram for
+# the port. taar_udp_recv drops one whose recorded source (ip @+0, port @+8,
+# as udp_recv#53 writes them) is not the peer taar_udp_send recorded.
+fn test_peer_match() {
+    test_group("peer-match");
+    var from[16];
+    store64(&from, 0x0A000035);                  # 10.0.0.53
+    store64(&from + 8, 53);
+    assert_eq(_taar_peer_match(&from, 0x0A000035, 53), 1, "reply from the peer accepted");
+    assert_eq(_taar_peer_match(&from, 0x0A000036, 53), 0, "other address dropped");
+    assert_eq(_taar_peer_match(&from, 0x0A000035, 5353), 0, "other port dropped");
+    assert_eq(_taar_peer_match(&from, 0, 0), 1, "no peer recorded: any sender, as unconnected");
+    return 0;
+}
+
 # Suite entry: runs every group in order; exit code is the failure count.
 fn main() {
     alloc_init();
@@ -338,6 +578,14 @@ fn main() {
     test_dns_tcp_frame();
     test_dns_reply_ok();
     test_socket_recv_contract();
+    test_resolv_parse();
+    test_resolv_choose();
+    test_dns_encode_bounds();
+    test_dns_answer_class();
+    test_dns_tcp_read_cap();
+    test_socket_send_timeout();
+    test_poll_deadline();
+    test_peer_match();
     return assert_summary();
 }
 

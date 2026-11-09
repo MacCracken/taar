@@ -17,9 +17,19 @@ Modes (argv[1]):
   tc_runt    as tc_answer, but TCP declares a length
              shorter than a DNS header                 -> client must refuse the
                                                           frame and fall back
+  tc_blackhole
+             as tc_answer, but the TCP listener's accept
+             queue is full, so the kernel drops the
+             client's SYNs and connect() never completes -> client must give
+                                                          up within its TCP
+                                                          timeout and fall back
+                                                          (an unbounded connect
+                                                          waits out ~127 s of
+                                                          SYN retries)
 
 Binds 127.0.0.53:53 so an unmodified /etc/resolv.conf points at it. Port 53
-needs CAP_NET_BIND_SERVICE, so run this inside `unshare -rn` (see run.sh).
+needs CAP_NET_BIND_SERVICE, so run this inside `unshare -rn` (see
+tc_fallback.sh).
 """
 import os
 import socket
@@ -33,7 +43,7 @@ TCP_IP = "10.11.12.13"
 MODE = sys.argv[1]
 TRUNCATE = MODE.startswith("tc")
 KEEP_ANSWER = MODE != "tc"          # only plain "tc" drops the answer entirely
-SERVE_TCP = MODE != "tc_answer"     # tc_answer proves the no-TCP fallback
+SERVE_TCP = MODE not in ("tc_answer", "tc_blackhole")   # no accepting TCP server
 # Deliberately lie about the framed length to exercise the client's bounds checks.
 BAD_LEN = {"tc_huge": 60000, "tc_runt": 4}.get(MODE)
 
@@ -104,8 +114,23 @@ def serve_tcp():
             conn.close()
 
 
+def blackhole_tcp():
+    """A listener that is never accepted from, with a zero-length accept queue
+    that one connection of our own fills. Linux drops any further SYN while the
+    queue is full (tcp_abort_on_overflow=0, the default), so the client sees no
+    SYN-ACK and no RST — exactly a filtered TCP/53."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.53", 53))
+    s.listen(0)
+    filler = socket.create_connection(("127.0.0.53", 53))
+    return s, filler
+
+
 threading.Thread(target=serve_udp, daemon=True).start()
 if SERVE_TCP:
     threading.Thread(target=serve_tcp, daemon=True).start()
+if MODE == "tc_blackhole":
+    _held = blackhole_tcp()          # keep both sockets alive for the run
 os.write(3, b"ready\n")             # fd 3 handshake: the harness waits on this
 threading.Event().wait()

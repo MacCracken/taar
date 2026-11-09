@@ -9,11 +9,12 @@
 #   socket.cyr  — raw-syscall UDP + TCP primitives (taar_udp_* / taar_tcp_*)
 #   dns.cyr     — hostname → IPv4 over UDP-53 (taar_resolve_ipv4)
 #
-# Both socket-bearing modules carry a Linux and an AGNOS backend behind
-# #ifdef CYRIUS_TARGET_AGNOS (shipped 0.3.0).
+# socket.cyr is the only module with per-target arms: a Linux and an AGNOS
+# backend behind #ifdef CYRIUS_TARGET_AGNOS. ipv4 is a pure codec and dns is
+# platform-neutral framing over socket's helpers.
 #
-# Planned (fold in per second-consumer trigger): icmp.cyr (echo + checksum)
-# when yo migrates; tls/http as whirl forces them.
+# Planned modules fold in per second-consumer trigger — see
+# docs/development/roadmap.md.
 
 include "src/ipv4.cyr"
 include "src/socket.cyr"

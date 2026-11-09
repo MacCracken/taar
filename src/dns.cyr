@@ -1,4 +1,5 @@
-# taar — DNS resolver: hostname → IPv4 (A record), over UDP-53.
+# taar — DNS resolver: hostname → IPv4 (A record), over UDP-53, retried over
+# TCP-53 when the UDP reply is truncated (TC).
 #
 # Ported from dig's dns.cyr (RFC 1035 framing) + resolv.cyr (resolver discovery),
 # narrowed to the A-record resolve path the net-tools family needs. Builds on
@@ -23,13 +24,27 @@ var _TAAR_DNS_RCODE_NOERROR = 0;
 var _TAAR_DNS_MAX_REPLIES   = 8;
 # Scratch sizes. Query: 12 header + 255 max wire name + 4 qtype/qclass = 271.
 # Reply: 2048 covers the 512-byte classic UDP limit with EDNS headroom.
+# Array declarations need literal sizes, so `var qbuf[300]` / `var rbuf[2048]`
+# below spell these out; every other use goes through the names.
 var _TAAR_DNS_QBUF_LEN      = 300;
 var _TAAR_DNS_RBUF_LEN      = 2048;
+var _TAAR_DNS_UDP_TIMEOUT_MS = 5000;     # per receive
 # TCP retry (RFC 1035 4.2.2). Its own timeout because a TCP exchange costs a
-# handshake on top of the query. MAX_SPINS bounds a peer that keeps accepting
-# zero bytes so send-all cannot livelock.
+# handshake on top of the query; taar_tcp_set_timeout_ms bounds the connect,
+# each send and each receive by it.
 var _TAAR_DNS_TCP_TIMEOUT_MS = 5000;
-var _TAAR_DNS_TCP_MAX_SPINS  = 64;
+# A send that accepts 0 bytes is "no progress yet", not an error. Linux never
+# does it on a blocking socket (SO_SNDTIMEO reports -EAGAIN instead); AGNOS
+# sock_send#48 does, after ~8 s without ACK progress. One retry, then give up:
+# this cap was 64, which let a stalled AGNOS peer hold the retry for ~8.5 min.
+var _TAAR_DNS_TCP_MAX_SPINS  = 1;
+# Reads allowed for one framed message. Each read may wait the full receive
+# timeout, so without a cap a peer dripping one byte at a time could hold a
+# 2 KB reply open for 2,048 timeouts (hours). A real reply needs a handful of
+# reads; 16 is generous. A true total deadline needs a monotonic clock the
+# consumers' stdlib does not carry (see roadmap).
+var _TAAR_DNS_TCP_MAX_READS  = 16;
+var _TAAR_DNS_TCP_OUT_LEN    = 304;      # framed query: QBUF_LEN + 2-byte prefix + slack
 
 var _TAAR_RESOLV_FALLBACK = 0x08080808;   # 8.8.8.8
 
@@ -55,9 +70,8 @@ fn _taar_dns_hdr_rcode(msg): i64   { return ((load8(msg + 2) << 8) | load8(msg +
 # arriving at our source port must never be parsed as though it were an answer.
 fn _taar_dns_hdr_qr(msg): i64      { return (load8(msg + 2) >> 7) & 1; }
 # TC (bit 9): the server truncated the message. Not rejected here — any A
-# record that did fit is still authoritative-as-sent — but a caller that needs
-# the complete RRset must retry over TCP. That fallback is a roadmap item
-# (docs/development/roadmap.md → "DNS TCP fallback on TC").
+# record that did fit is still authoritative-as-sent — and taar_resolve_ipv4
+# retries over TCP-53 for the complete answer (since 0.4.0).
 fn _taar_dns_hdr_tc(msg): i64      { return (load8(msg + 2) >> 1) & 1; }
 
 # Encode "example.com" → wire labels at `out`. Returns bytes written, or 0.
@@ -140,6 +154,10 @@ fn _taar_dns_skip_name(msg, msg_len, off): i64 {
             # that survives if that ordering is ever refactored.
             if (ptr >= msg_len) { return 0; }
             if (end_off == 0) { end_off = cur + 2; }
+            # Load-bearing, not belt-and-braces: a pointer may only go backward,
+            # but a label can then walk forward past it again, so
+            # [label][ptr -> that label] loops forever on the backward rule
+            # alone. Pinned by test_dns_hostile's "label + back-pointer loop".
             hops = hops + 1;
             if (hops > _TAAR_DNS_MAX_HOPS) { return 0; }
             if (ptr >= cur) { return 0; }
@@ -169,6 +187,10 @@ fn _taar_dns_answer_start(msg, msg_len): i64 {
 }
 
 # First A-record IPv4 (packed first-octet-high-byte) in the answer section, or -1.
+# Only class-IN records count: an A record of another class (CH, HS) is not an
+# Internet address, whatever its four bytes say. The owner name is NOT checked
+# against the question or its CNAME chain — taar trusts its configured
+# resolver's answer section (roadmap: owner-name validation).
 fn _taar_dns_first_a(msg, msg_len): i64 {
     var off = _taar_dns_answer_start(msg, msg_len);
     if (off == 0) { return 0 - 1; }
@@ -179,16 +201,19 @@ fn _taar_dns_first_a(msg, msg_len): i64 {
         if (p == 0) { return 0 - 1; }
         if (p + 10 > msg_len) { return 0 - 1; }
         var rtype = _taar_dns_load_u16(msg, p);
+        var rclass = _taar_dns_load_u16(msg, p + 2);
         var rdlen = _taar_dns_load_u16(msg, p + 8);
         var rdata = p + 10;
         if (rdata + rdlen > msg_len) { return 0 - 1; }
         if (rtype == _TAAR_DNS_TYPE_A) {
-            if (rdlen == 4) {
-                var o0 = load8(msg + rdata);
-                var o1 = load8(msg + rdata + 1);
-                var o2 = load8(msg + rdata + 2);
-                var o3 = load8(msg + rdata + 3);
-                return (o0 << 24) | (o1 << 16) | (o2 << 8) | o3;
+            if (rclass == _TAAR_DNS_CLASS_IN) {
+                if (rdlen == 4) {
+                    var o0 = load8(msg + rdata);
+                    var o1 = load8(msg + rdata + 1);
+                    var o2 = load8(msg + rdata + 2);
+                    var o3 = load8(msg + rdata + 3);
+                    return (o0 << 24) | (o1 << 16) | (o2 << 8) | o3;
+                }
             }
         }
         off = rdata + rdlen;
@@ -242,14 +267,22 @@ fn _taar_resolv_match(buf, len, i, lit, lit_len): i64 {
     return 1;
 }
 
-# First `nameserver X.X.X.X` IPv4 (packed), or 0.
+# First usable `nameserver X.X.X.X` (packed), 0 if the text names no
+# nameserver at all, or -1 if it names nameservers but none taar can use —
+# IPv6 addresses, 0.0.0.0, anything malformed. The caller must keep those last
+# two apart: "no resolver configured" and "a resolver configured that taar
+# cannot reach" call for different answers (see _taar_resolv_choose).
+#
+# A token ends at a space, tab or CR, so CRLF files parse; the address must be
+# a strict dotted quad (ipv4_parse).
 fn _taar_resolv_parse(buf, len): i64 {
     if (buf == 0) { return 0; }
     if (len <= 0) { return 0; }
+    var saw = 0;                       # a nameserver entry was present
     var i = 0;
     while (i < len) {
         i = _taar_resolv_skip_blank(buf, len, i);
-        if (i >= len) { return 0; }
+        if (i >= len) { break; }
         var c = load8(buf + i);
         if (c == 35) { i = _taar_resolv_find_eol(buf, len, i) + 1; }
         elif (c == 59) { i = _taar_resolv_find_eol(buf, len, i) + 1; }
@@ -268,27 +301,76 @@ fn _taar_resolv_parse(buf, len): i64 {
                         var ec = load8(buf + end);
                         if (ec == 32) { break; }
                         if (ec == 9) { break; }
+                        if (ec == 13) { break; }
                         end = end + 1;
                     }
                     var tlen = end - j;
                     if (tlen > 0) {
+                        saw = 1;
+                        # 64 bounds the copy into tmp[80]; no dotted quad is longer than 15.
                         if (tlen <= 64) {
                             var tmp[80];
                             var k2 = 0;
                             while (k2 < tlen) { store8(&tmp + k2, load8(buf + j + k2)); k2 = k2 + 1; }
                             store8(&tmp + tlen, 0);
                             var addr = ipv4_parse(&tmp);
-                            if (addr >= 0) { return addr; }
+                            if (addr > 0) { return addr; }
                         }
                     }
                     i = eol + 1;
-                } else { return 0; }
+                } else { break; }
             } else {
                 i = _taar_resolv_find_eol(buf, len, i) + 1;
             }
         }
     }
+    if (saw == 1) { return 0 - 1; }
     return 0;
+}
+
+# Length of `buf[0, n)` up to and including its last newline, or 0 if it has
+# none. Applied when a read filled the whole buffer: the file may be longer,
+# so its last line may have been cut — "nameserver 10.0.0.12" read as
+# "nameserver 10.0.0.1" is a well-formed, wrong address.
+fn _taar_resolv_complete_len(buf, n): i64 {
+    var i = n;
+    while (i > 0) {
+        if (load8(buf + i - 1) == 10) { return i; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# The discovery decision, pure so the suite can drive it. `ksrv` is the
+# kernel-leased resolver (0 if none), `buf`/`n` the resolv.conf read (n < 0 if
+# the read failed), `cap` the buffer size it was read into. Returns the
+# nameserver to use, or 0 to fail the resolve.
+#
+#   kernel lease                          -> that
+#   a usable nameserver in the file       -> that
+#   no file, or a file naming none        -> _TAAR_RESOLV_FALLBACK (8.8.8.8)
+#   nameservers present, none usable      -> 0: fail closed
+#   file larger than the buffer, no usable
+#   nameserver in its complete lines      -> 0: fail closed
+#
+# Fail closed, because the host has chosen a resolver (a VPN's, a
+# split-horizon or filtering one) and sending its lookups to a public resolver
+# instead would bypass that choice and disclose every hostname to a third
+# party. Until 0.6.2 both of those cases fell through to 8.8.8.8.
+fn _taar_resolv_choose(ksrv, buf, n, cap): i64 {
+    if (ksrv > 0) { return ksrv; }
+    if (n <= 0) { return _TAAR_RESOLV_FALLBACK; }
+    var len = n;
+    var cut = 0;
+    if (n >= cap) {
+        cut = 1;
+        len = _taar_resolv_complete_len(buf, n);
+    }
+    var r = _taar_resolv_parse(buf, len);
+    if (r > 0) { return r; }
+    if (r < 0) { return 0; }
+    if (cut == 1) { return 0; }
+    return _TAAR_RESOLV_FALLBACK;
 }
 
 # Kernel-leased resolver (AGNOS net_config#61) → /etc/resolv.conf → 8.8.8.8.
@@ -296,7 +378,8 @@ fn _taar_resolv_parse(buf, len): i64 {
 # preferring it avoids the off-subnet 8.8.8.8 fallback, which needs working
 # gateway routing the kernel can't guarantee on real iron (the QEMU-passed /
 # iron-failed gap). _taar_plat_dns_server() returns 0 on Linux, so the
-# resolv.conf path is unchanged there.
+# resolv.conf path is unchanged there. Returns the nameserver, or 0 when the
+# resolve must fail closed; the rules are _taar_resolv_choose's.
 fn _taar_resolv_discover(): i64 {
     var ksrv = _taar_plat_dns_server();
     if (ksrv > 0) { return ksrv; }
@@ -306,11 +389,7 @@ fn _taar_resolv_discover(): i64 {
     # and dns.cyr now matches it.
     var buf[4096];
     var n = _taar_plat_read_file("/etc/resolv.conf", &buf, 4096);
-    if (n > 0) {
-        var addr = _taar_resolv_parse(&buf, n);
-        if (addr > 0) { return addr; }
-    }
-    return _TAAR_RESOLV_FALLBACK;
+    return _taar_resolv_choose(0, &buf, n, 4096);
 }
 
 # --- TCP transport (RFC 1035 4.2.2) ---
@@ -354,12 +433,16 @@ fn _taar_dns_tcp_send_all(fd, buf, len): i64 {
 }
 
 # Read exactly `want` bytes. Returns how many were actually read — a short
-# return means the peer closed or the deadline expired (taar_tcp_recv reports
-# both as 0), which the caller treats as a failed retry. Always terminates:
-# each pass either advances `off` or returns.
+# return means the peer closed (0), the deadline expired (_TAAR_ERR_TIMEOUT),
+# the read failed, or the peer needed more than _TAAR_DNS_TCP_MAX_READS reads;
+# the caller treats every one as a failed retry. Always terminates: at most
+# _TAAR_DNS_TCP_MAX_READS reads, each bounded by the socket's receive timeout.
 fn _taar_dns_tcp_read_all(fd, buf, want): i64 {
     var off = 0;
+    var reads = 0;
     while (off < want) {
+        if (reads >= _TAAR_DNS_TCP_MAX_READS) { return off; }
+        reads = reads + 1;
         var n = taar_tcp_recv(fd, buf + off, want - off);
         if (n <= 0) { return off; }
         off = off + n;
@@ -372,18 +455,21 @@ fn _taar_dns_tcp_read_all(fd, buf, want): i64 {
 # `rmax` is refused outright rather than truncated — a half-read message
 # would parse as though it were whole.
 fn _taar_dns_query_tcp(ns, qbuf, qlen, rbuf, rmax): i64 {
-    var out[304];                       # _TAAR_DNS_QBUF_LEN + 2 prefix + slack
+    var out[304];                       # _TAAR_DNS_TCP_OUT_LEN
     # _taar_dns_tcp_frame allows any qlen up to 0xFFFF — correct for the framing
     # rule, but `out` is fixed. Every in-tree caller is bounded by
     # _taar_dns_build_query (271 max), so this only fires on a future caller;
     # it is here so the overflow cannot be introduced by one.
-    if (qlen + 2 > 304) { return 0 - 1; }
+    if (qlen + 2 > _TAAR_DNS_TCP_OUT_LEN) { return 0 - 1; }
     var framed = _taar_dns_tcp_frame(qbuf, qlen, &out);
     if (framed == 0) { return 0 - 1; }
 
     var fd = taar_tcp_open();
     if (fd < 0) { return 0 - 1; }
-    taar_tcp_set_timeout_ms(fd, _TAAR_DNS_TCP_TIMEOUT_MS);
+    # Fail closed: without its deadlines this socket's connect and reads could
+    # block indefinitely. (No test can make setsockopt fail on a fresh socket,
+    # so this guard is untested; it costs one compare.)
+    if (taar_tcp_set_timeout_ms(fd, _TAAR_DNS_TCP_TIMEOUT_MS) < 0) { taar_sock_close(fd); return 0 - 1; }
     if (taar_tcp_connect(fd, ns, 53) < 0) { taar_sock_close(fd); return 0 - 1; }
     if (_taar_dns_tcp_send_all(fd, &out, framed) < 0) { taar_sock_close(fd); return 0 - 1; }
 
@@ -423,16 +509,20 @@ fn _taar_dns_reply_ok(qbuf, qlen, buf, len, id): i64 {
 #
 # Reply acceptance is deliberately strict (RFC 5452). A datagram is only
 # parsed for answers once it is a response (QR=1), carries our query ID,
-# holds exactly one question, and echoes that question byte-for-byte. The
-# kernel additionally drops anything not from the nameserver we sent to,
-# because taar_udp_send connects the socket. Non-matching datagrams are
-# skipped and the wait resumes, up to _TAAR_DNS_MAX_REPLIES.
+# holds exactly one question, and echoes that question byte-for-byte. Anything
+# not from the nameserver we sent to is dropped before that: by the Linux
+# kernel, because taar_udp_send connects the socket, and on AGNOS by
+# taar_udp_recv itself. Non-matching datagrams are skipped and the wait
+# resumes, up to _TAAR_DNS_MAX_REPLIES.
 #
 # Tradeoff: the worst-case wait becomes _TAAR_DNS_MAX_REPLIES × the socket
 # timeout (8 x 5s) instead of a single 5s, if something can land a
-# non-matching datagram just before each expiry. Since the socket is
-# connected, doing that requires forging the nameserver's own address and
-# port — an on-path position. Trading that bounded latency for "one stray
+# non-matching datagram just before each expiry. Doing that takes datagrams
+# forged with the nameserver's address and port, which an off-path sender can
+# do blind — but it only delays the resolve; none of them is accepted without
+# the right ID and question. A spoofed ICMP port-unreachable can end the wait
+# early (the connected socket reports -ECONNREFUSED); the result is a failed
+# resolve, never a wrong answer. Trading that bounded latency for "one stray
 # packet kills the resolve" is the right way round.
 fn taar_resolve_ipv4(host): i64 {
     if (host == 0) { return 0 - 1; }
@@ -454,7 +544,9 @@ fn taar_resolve_ipv4(host): i64 {
 
     var fd = taar_udp_open();
     if (fd < 0) { return 0 - 1; }
-    taar_udp_set_timeout_ms(fd, 5000);
+    # Fail closed: without SO_RCVTIMEO the receive below could block forever.
+    # (Untested for the same reason as the TCP twin in _taar_dns_query_tcp.)
+    if (taar_udp_set_timeout_ms(fd, _TAAR_DNS_UDP_TIMEOUT_MS) < 0) { taar_udp_close(fd); return 0 - 1; }
 
     var sent = taar_udp_send(fd, ns, 53, &qbuf, qlen);
     if (sent < 0) { taar_udp_close(fd); return 0 - 1; }
@@ -464,7 +556,7 @@ fn taar_resolve_ipv4(host): i64 {
     var tries = 0;
     while (tries < _TAAR_DNS_MAX_REPLIES) {
         tries = tries + 1;
-        var n = taar_udp_recv(fd, &rbuf, 2048);
+        var n = taar_udp_recv(fd, &rbuf, _TAAR_DNS_RBUF_LEN);
         if (n < 0) { break; }                                          # timeout / error
         if (_taar_dns_reply_ok(&qbuf, qlen, &rbuf, n, id) != 1) { continue; }
         rn = n;
@@ -484,7 +576,7 @@ fn taar_resolve_ipv4(host): i64 {
     # Every failure path falls back to `answer`, the truncated-but-valid
     # datagram result, which is exactly what taar returned before this retry
     # existed. The retry can therefore only improve an answer, never lose one.
-    var tn = _taar_dns_query_tcp(ns, &qbuf, qlen, &rbuf, 2048);
+    var tn = _taar_dns_query_tcp(ns, &qbuf, qlen, &rbuf, _TAAR_DNS_RBUF_LEN);
     if (tn < 0) { return answer; }
     if (_taar_dns_reply_ok(&qbuf, qlen, &rbuf, tn, id) != 1) { return answer; }
     if (_taar_dns_hdr_rcode(&rbuf) != _TAAR_DNS_RCODE_NOERROR) { return answer; }

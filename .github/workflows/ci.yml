@@ -7,6 +7,11 @@ on:
     branches: [main]
   workflow_call:
 
+# Least privilege: nothing here writes to the repo. release.yml calls this
+# workflow and grants write only to its own release job.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -16,7 +21,7 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
 
       - name: Install Cyrius toolchain
         run: |
@@ -25,10 +30,13 @@ jobs:
           # truth for the toolchain version — no version is hardcoded in this
           # YAML. Read the pin and hand it to the upstream installer, which
           # fetches + lays out $HOME/.cyrius/{bin,lib}. (Hand-rolled curl+cp
-          # fails `cyrius deps` pin-check — install.sh is required.)
+          # fails `cyrius deps` pin-check — install.sh is required.) The
+          # installer itself is fetched at the pinned TAG, not `main`, so CI
+          # runs the script that shipped with the pinned release; that script
+          # checksum- and signature-verifies what it installs.
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_VERSION}/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
@@ -39,7 +47,7 @@ jobs:
         # Hard gate: any `warn` line fails CI (matches patra / sigil / agnosys).
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/*.tcyr; do
+          for f in src/*.cyr programs/*.cyr tests/*.tcyr benches/*.bcyr; do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
             if echo "$out" | grep -qE '^[[:space:]]*warn '; then
@@ -49,13 +57,13 @@ jobs:
           [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
 
       - name: Doc coverage
-        # Every public fn in src/, programs/ and tests/ carries a doc comment —
-        # the same scope `cyrius audit` reports on (tests/ joined it at cyrius
-        # 6.6.20). Gate it so that does not quietly rot — `cyrius audit`
+        # Every public fn in src/, programs/, tests/ and benches/ carries a doc
+        # comment — the same scope `cyrius audit` reports on (tests/ joined it at
+        # cyrius 6.6.20, benches/ when taar gained one). Gate it so that does not quietly rot — `cyrius audit`
         # reports the count but does not fail on it.
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/*.tcyr; do
+          for f in src/*.cyr programs/*.cyr tests/*.tcyr benches/*.bcyr; do
             out=$(cyrius doc --check "$f" 2>&1 || true)
             echo "$f: $(echo "$out" | tail -1)"
             if echo "$out" | grep -q 'undocumented: '; then
@@ -65,27 +73,13 @@ jobs:
           done
           [ $fail -eq 0 ] || { echo "doc: undocumented public fns"; exit 1; }
 
-      - name: Regenerate dist bundle (cyrius distlib)
-        # taar is a distlib: `cyrius distlib` concatenates [lib].modules
-        # (src/ipv4.cyr today) into dist/taar.cyr. Consumers (yo, dig)
-        # `cyrius deps`-resolve it and `include "lib/taar.cyr"`.
-        run: |
-          cyrius distlib
-          test -s dist/taar.cyr || { echo "dist/taar.cyr missing or empty after distlib"; exit 1; }
-          echo "dist/taar.cyr: $(wc -c < dist/taar.cyr) bytes"
-
-      - name: Check committed bundle freshness (soft)
-        # The committed dist/taar.cyr should match a fresh regeneration —
-        # a stale bundle ships old code to consumers. Soft (warning) so a
-        # benign formatting/toolchain delta doesn't red the build; release
-        # regenerates the bundle authoritatively.
-        run: |
-          if ! git diff --quiet -- dist/taar.cyr; then
-            echo "::warning::dist/taar.cyr differs from a fresh 'cyrius distlib' — run it and commit the regenerated bundle"
-            git --no-pager diff -- dist/taar.cyr || true
-          else
-            echo "committed dist/taar.cyr is up to date"
-          fi
+      - name: Committed bundle is current
+        # taar is a distlib: consumers `cyrius deps`-resolve it at a git tag and
+        # `include "lib/taar.cyr"`, so the COMMITTED dist/taar.cyr is what ships.
+        # Hard gate: with the toolchain pinned there is no benign delta, and a
+        # stale bundle ships old code. `--check` regenerates to a scratch path,
+        # compares, and exits 1 on any difference (including the sidecar).
+        run: cyrius distlib --check
 
       - name: Build smoke
         run: |
@@ -119,17 +113,22 @@ jobs:
       - name: Unit tests
         run: cyrius test tests/taar.tcyr
 
+      - name: Benchmarks (compile + run)
+        # The rows are informational — CI runners are too noisy to gate on
+        # timings. Running them keeps benches/ compiling against the pin.
+        run: cyrius bench benches/
+
   aarch64:
     name: aarch64 Cross-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
 
       - name: Install Cyrius toolchain
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_VERSION}/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
@@ -155,13 +154,13 @@ jobs:
     name: DNS TC-fallback (integration)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
 
       - name: Install Cyrius toolchain
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_VERSION}/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
@@ -183,18 +182,14 @@ jobs:
         if: steps.probe.outputs.ok == '1'
         run: cyrius deps
 
-      - name: Build resolve-smoke
-        if: steps.probe.outputs.ok == '1'
-        run: |
-          mkdir -p build
-          cyrius build programs/resolve-smoke.cyr build/taar-resolve
-
       - name: TC-fallback cases
         # Covers what no unit test can: taar_resolve_ipv4 retrying over TCP-53
-        # when a reply sets TC, falling back when the retry fails, and refusing
-        # a TCP peer that lies about its framed length. That last case is a real
-        # stack-overflow guard — without it the client writes 60000 bytes into
-        # a 2KB stack buffer and dies.
+        # when a reply sets TC, falling back when the retry fails, refusing a
+        # TCP peer that lies about its framed length (a real stack-overflow
+        # guard — without it the client writes 60000 bytes into a 2KB stack
+        # buffer), and bounding a TCP connect whose SYNs are dropped. The
+        # script builds its own resolve binary from the checkout, so it can
+        # never test a stale one.
         if: steps.probe.outputs.ok == '1'
         run: tests/integration/tc_fallback.sh
 
@@ -202,23 +197,26 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Scan for dangerous patterns
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
+      - name: No syscall-number literals in shipped or program code
+        # CLAUDE.md: syscall numbers come from the stdlib's arch-dispatched
+        # sys_* wrappers, never literals. A literal can look portable and still
+        # mean a different call on aarch64 (0.3.3: 44 is sendto on x86_64,
+        # fstatfs on aarch64) — clean build, wrong syscall at runtime.
+        # Named constants (`syscall(SYS_EXIT, …)`) are fine; digits are not.
         run: |
-          WARN=0
-          if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# "; then
-            echo "WARN: raw execve"; WARN=1
+          # `^[^#]*` skips comments, which quote the historical literals.
+          if grep -nE '^[^#]*syscall\([[:space:]]*[0-9]' src/*.cyr programs/*.cyr; then
+            echo "error: raw syscall number above — use the stdlib's sys_* wrapper"
+            exit 1
           fi
-          if grep -rn '"/etc/' src/ 2>/dev/null; then
-            echo "WARN: hardcoded /etc paths"; WARN=1
-          fi
-          echo "security scan complete (warnings: $WARN)"
+          echo "no syscall-number literals"
 
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
       - name: Check required docs
         run: |
           MISSING=0

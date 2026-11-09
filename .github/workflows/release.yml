@@ -4,8 +4,10 @@ on:
   push:
     tags: ['[0-9]*']
 
+# Read-only by default (this also bounds the reusable CI gate below); only
+# the release job, which publishes the GitHub release, gets write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -16,8 +18,10 @@ jobs:
     name: Build & Release
     needs: [ci]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
 
       - name: Verify version
         run: |
@@ -41,7 +45,7 @@ jobs:
           # `cyrius deps` pin-checks) — never a hand-rolled curl+cp.
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_VERSION}/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
@@ -72,7 +76,8 @@ jobs:
         run: |
           awk "/^## \\[${GITHUB_REF_NAME}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
 
-      - uses: softprops/action-gh-release@v2
+      # Third-party action holding a write token: pinned by commit SHA.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           name: "taar ${{ github.ref_name }}"
           body_path: /tmp/body.md
