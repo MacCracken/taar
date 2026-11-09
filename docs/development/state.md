@@ -8,7 +8,7 @@
 
 ## Version
 
-**0.5.2** — 2026-11-08.
+**0.6.0** — 2026-11-08.
 
 `dist/taar.cyr` is 984 lines (`wc -l`; `cyrius distlib` reports 967, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
@@ -16,11 +16,11 @@ same bundle).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (`cyrius.cyml [package].cyrius`) — the single source
+- **Cyrius pin**: `6.7.9` (`cyrius.cyml [package].cyrius`) — the single source
   of truth. Both CI workflows read it to install the toolchain; no version is
   hardcoded in YAML.
 - **`lib/`** is a `cyrius deps` build artifact (gitignored), not source. At this
-  pin it resolves to 19 files, every one byte-identical to the 6.6.20 bundled
+  pin it resolves to 19 files, every one byte-identical to the 6.7.9 bundled
   stdlib snapshot.
 - **Dependency surface.** `[deps] stdlib` is `syscalls`, `fmt`, `assert`,
   `alloc` — taar's *build* list. What a consumer needs is what `distlib`'s
@@ -62,7 +62,15 @@ RFC-1035 framing that reaches the kernel only through `socket`'s helpers. The
 
 All three are on cyrius `6.6.2` and already declare every leaf the sidecar
 used to over-report (`assert`, `alloc`, `vec`) in their own `[deps] stdlib`, so
-the slimmer 0.5.2 sidecar does not change what they vendor.
+the two-leaf sidecar (since 0.5.2) does not change what they vendor.
+
+The bundle uses no 6.7 language feature, so it still compiles on a consumer's
+`6.6.2` toolchain: x86_64 and aarch64 build and run, and AGNOS builds. One
+caveat: the two-leaf sidecar is exact at taar's own pin, not below it. `6.6.2`'s
+`fmt.cyr` does not include its own `string` / `alloc` / `vec`, so on that
+stdlib, `syscalls` + `fmt` alone leave `alloc`, `strlen`, `memcpy` and
+`vec_get` undefined. All three consumers declare those leaves, so none is
+affected.
 
 ## Verification
 

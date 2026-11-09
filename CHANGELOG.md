@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-08
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (the 6.7 language minor: checked traits,
+  `dyn`, tuples, slices, bounds-checked mode). No source change was needed.
+  Every 6.7.x migration note was checked against taar first:
+  - no lone `!` (before 6.7.3 the lexer dropped it, so `!x` meant `x`);
+  - no unary `-` / `~` on a constant followed by an operator and a literal
+    (6.7.9 re-binds those);
+  - no identifier the 6.7.x releases reserved (`trait`, `const`, `true` /
+    `false`, `do`, `dyn`);
+  - no `impl`, typed pointer or `bool`.
+
+  All **93 assertions** pass on x86_64 and on aarch64 (executed under
+  `qemu-aarch64`), the AGNOS build still compiles with its arm selected, and all
+  five TC-fallback cases pass. The two live smokes (`resolve-smoke` over UDP,
+  `tcp-resolve-smoke` over TCP) resolved against a real resolver. `lib/` was
+  re-vendored: the same 19 files, each byte-identical to the 6.7.9 bundled
+  stdlib.
+- **`dist/taar.cyr` differs from 0.5.2 only in its version line.** The sidecar
+  is still `syscalls` + `fmt`. The bundle still compiles on consumers' cyrius
+  `6.6.2` (x86_64 and aarch64 built and run, AGNOS built), so the toolchain
+  bump does not force one on `yo`, `dig` or `whirl`.
+- **`cyrius tests` → `cyrius test`.** The plural form is a deprecated alias
+  since 6.7.6. At 6.7.9 it prints "goes in the next release", and at 6.7.12 it
+  becomes an unknown command (rc 1). CI's `aarch64` job, `CLAUDE.md`'s work
+  loop, the README and a `src/test.cyr` comment now use
+  `cyrius test [--aarch64] tests/`, which gives the same 93/93.
+
 ## [0.5.2] - 2026-11-08
 
 ### Changed

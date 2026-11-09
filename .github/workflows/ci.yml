@@ -149,7 +149,7 @@ jobs:
           mkdir -p build
           cyrius build --aarch64 programs/smoke.cyr build/taar-smoke-a64
           qemu-aarch64 build/taar-smoke-a64
-          cyrius tests --aarch64 tests/
+          cyrius test --aarch64 tests/
 
   integration:
     name: DNS TC-fallback (integration)

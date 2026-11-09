@@ -66,7 +66,7 @@ address codecs, socket I/O, packet construction, and DNS.
    Respect the growth rule above — if a module's trigger has not fired, it is
    not next.
 2. `cyrius audit` green (fmt + lint + docs + tests).
-3. `cyrius tests --aarch64 tests/` green. Not optional: the 0.3.3 `sendto`
+3. `cyrius test --aarch64 tests/` green. Not optional: the 0.3.3 `sendto`
    defect built clean on aarch64 and only failed when executed.
 4. `CYRIUS_TARGET_AGNOS=1 cyrius build --agnos src/main.cyr` compiles.
 5. Touched the DNS path? `tests/integration/tc_fallback.sh`.
