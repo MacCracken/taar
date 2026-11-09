@@ -59,6 +59,11 @@ var _TAAR_SO_SNDTIMEO = 21;
 # from read(2)/recvfrom(2) — so the AGNOS poll loops report a timeout using the
 # same value the kernel would, and callers need one check, not two.
 var _TAAR_ERR_TIMEOUT = 0 - 11;
+# A receive a signal interrupted: Linux's -EINTR. With SO_RCVTIMEO set, Linux
+# never restarts recvfrom(2) / read(2) after a signal — not even after a bare
+# SIGSTOP / SIGCONT with no handler — so a caller that wants to keep waiting
+# has to check for it. The AGNOS arm never returns it (its waits are polls).
+var _TAAR_ERR_INTR = 0 - 4;
 
 # Fill a caller-provided 16-byte buffer as a sockaddr_in for `packed_addr`
 # (first-octet-high-byte) + `port` (written network byte order).

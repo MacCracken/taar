@@ -148,7 +148,7 @@ jobs:
           cyrius test --aarch64 tests/
 
   integration:
-    name: DNS TC-fallback (integration)
+    name: DNS integration (TC fallback, resolver)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
@@ -173,7 +173,7 @@ jobs:
         # both without root. If a runner forbids it the cases cannot run, so
         # warn loudly rather than failing the build on a sandbox policy.
         run: |
-          if unshare -rn --pid --fork --kill-child true 2>/dev/null; then
+          if unshare -rnm --pid --fork --kill-child true 2>/dev/null; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "ok=0" >> "$GITHUB_OUTPUT"
@@ -194,6 +194,16 @@ jobs:
         # never test a stale one.
         if: steps.probe.outputs.ok == '1'
         run: tests/integration/tc_fallback.sh
+
+      - name: Resolver cases
+        # Nameserver failover (unreachable, silent, SERVFAIL, REFUSED,
+        # unroutable, truncated-and-empty), NXDOMAIN as final, the
+        # resolv.conf options timeout / attempts, the three-server limit, a
+        # fresh query ID per server, and a resolve surviving a stop/continue
+        # mid-wait (EINTR) on both the UDP and the TCP read. Several fake
+        # nameservers per case, each counting the queries it receives.
+        if: steps.probe.outputs.ok == '1'
+        run: tests/integration/resolver.sh
 
   agnos:
     name: AGNOS backend (executed under QEMU)

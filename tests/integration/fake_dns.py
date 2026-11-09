@@ -30,6 +30,25 @@ Modes (argv[1]):
              (right ID, right question, SPOOF_IP) from
              the same address but port SPOOF_PORT      -> client must ignore the
                                                           forgery and use UDP_IP
+  servfail   UDP replies SERVFAIL (rcode 2), no answer  -> client must ask its
+                                                          next nameserver
+  refused    UDP replies REFUSED (rcode 5), no answer   -> likewise
+  nxdomain   UDP replies NXDOMAIN (rcode 3)             -> client must stop: the
+                                                          name does not exist,
+                                                          and no other server is
+                                                          asked
+  silent     UDP bound, never replies                   -> client must give up on
+                                                          this server at its
+                                                          timeout
+  slow       as full, but the reply waits SLOW_S        -> lets the harness stop
+                                                          and continue the client
+                                                          mid-wait
+  tc_slow    as tc, but the TCP reply waits SLOW_S      -> the same, during the
+                                                          TCP retry's read
+  tc_empty   UDP replies TC=1 with no answer, and no
+             TCP listener                               -> this server said
+                                                          nothing usable: client
+                                                          must ask the next one
   bylabel    every mode above but tc_blackhole at once: each query's first
              label names its mode ("tc_huge.taar.test" behaves as tc_huge).
              One TCP listener serves them all, so the no-listener modes
@@ -38,9 +57,12 @@ Modes (argv[1]):
              AGNOS harness (tests/agnos/run.sh), which boots once for every
              case instead of once per mode.
 
-Binds 127.0.0.53:53 so an unmodified /etc/resolv.conf points at it. Port 53
-needs CAP_NET_BIND_SERVICE, so run this inside `unshare -rn` (see
-tc_fallback.sh).
+Binds 127.0.0.53:53 so an unmodified /etc/resolv.conf points at it, or
+`--addr A` to bind another loopback address (several servers at once, for
+tests/integration/resolver.sh). `--log F` appends one line to F per UDP query
+received ("query <id>", the query ID in hex), so a harness can count what was
+asked and check that each query carried a fresh ID. Port 53 needs
+CAP_NET_BIND_SERVICE, so run this inside `unshare -rn` (see tc_fallback.sh).
 """
 import os
 import socket
@@ -55,6 +77,7 @@ SPOOF_IP = "10.6.6.6"
 ADDR = "127.0.0.53"
 SPOOF_PORT = 5353
 SPOOF_LEAD_S = 0.05           # how far the forgery runs ahead of the real reply
+SLOW_S = 1.5                  # the slow mode's reply delay
 
 # What each mode does. tc: set TC on the UDP reply. keep: the UDP reply still
 # carries the answer. tcp: "serve" | "none" (no listener) | "blackhole".
@@ -67,9 +90,26 @@ MODES = {
     "tc_runt":      dict(tc=True,  keep=True,  tcp="serve", bad_len=4),
     "tc_blackhole": dict(tc=True,  keep=True,  tcp="blackhole"),
     "spoof":        dict(tc=False, keep=True,  tcp="serve", spoof=True),
+    "servfail":     dict(tc=False, keep=False, tcp="none", rcode=2),
+    "refused":      dict(tc=False, keep=False, tcp="none", rcode=5),
+    "nxdomain":     dict(tc=False, keep=False, tcp="none", rcode=3),
+    "silent":       dict(tc=False, keep=False, tcp="none", silent=True),
+    "slow":         dict(tc=False, keep=True,  tcp="none", delay=SLOW_S),
+    "tc_slow":      dict(tc=True,  keep=False, tcp="serve", tcp_delay=SLOW_S),
+    "tc_empty":     dict(tc=True,  keep=False, tcp="none"),
 }
 
 MODE = sys.argv[1]
+LOG = None
+_args = sys.argv[2:]
+while _args:
+    if _args[0] == "--addr" and len(_args) > 1:
+        ADDR = _args[1]
+    elif _args[0] == "--log" and len(_args) > 1:
+        LOG = _args[1]
+    else:
+        sys.exit("fake_dns: bad argument " + _args[0])
+    _args = _args[2:]
 BYLABEL = MODE == "bylabel"
 if not BYLABEL and MODE not in MODES:
     sys.exit("fake_dns: unknown mode " + MODE)
@@ -113,9 +153,22 @@ def serve_udp():
     while True:
         data, addr = s.recvfrom(2048)
         qid, q = parse(data)
+        if LOG:
+            with open(LOG, "a") as f:
+                f.write("query %04x\n" % qid)
         b = behaviour(q)
         if b is None:
             s.sendto(build(qid, q, UDP_IP, False, False, rcode=5), addr)   # REFUSED
+            continue
+        if b.get("silent"):
+            continue
+        if b.get("rcode"):
+            s.sendto(build(qid, q, UDP_IP, False, False, rcode=b["rcode"]), addr)
+            continue
+        if b.get("delay"):
+            keep = (not b["tc"]) or b["keep"]
+            reply = build(qid, q, UDP_IP, b["tc"], keep)
+            threading.Timer(b["delay"], s.sendto, (reply, addr)).start()
             continue
         if b.get("spoof"):
             forger.sendto(build(qid, q, SPOOF_IP, False, True), addr)
@@ -139,6 +192,8 @@ def serve_tcp_conn(conn):
         if b is None or b["tcp"] != "serve":
             return                       # bylabel's stand-in for "no listener"
         resp = build(qid, q, TCP_IP, False, True)
+        if b.get("tcp_delay"):
+            time.sleep(b["tcp_delay"])
         bad_len = b.get("bad_len")
         declared = bad_len if bad_len is not None else len(resp)
         if bad_len is not None and declared > len(resp):

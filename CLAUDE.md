@@ -69,7 +69,8 @@ address codecs, socket I/O, packet construction, and DNS.
 3. `cyrius test --aarch64 tests/` green. Not optional: the 0.3.3 `sendto`
    defect built clean on aarch64 and only failed when executed.
 4. `CYRIUS_TARGET_AGNOS=1 cyrius build --agnos src/main.cyr` compiles.
-5. Touched the DNS path? `tests/integration/tc_fallback.sh`.
+5. Touched the DNS path? `tests/integration/tc_fallback.sh` and
+   `tests/integration/resolver.sh`.
    Touched `src/socket.cyr` or `src/dns.cyr`? `tests/agnos/run.sh` too — it
    boots agnos under QEMU and is the only place the AGNOS arm executes. A
    mutation of that arm is checked there, not in `tests/taar.tcyr`.

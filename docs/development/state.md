@@ -8,10 +8,10 @@
 
 ## Version
 
-**0.7.1** — 2026-11-09. Last P(-1) review (0.6.2):
+**0.8.0** — 2026-11-09. Last P(-1) review (0.6.2):
 [`docs/audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
 
-`dist/taar.cyr` is 1322 lines (`wc -l`; `cyrius distlib` reports 1305, excluding
+`dist/taar.cyr` is 1468 lines (`wc -l`; `cyrius distlib` reports 1451, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
 same bundle).
 
@@ -44,7 +44,7 @@ same bundle).
 |--------|---------|-------|
 | `ipv4` | `ipv4_parse`, `ipv4_format_to_buf` | 0.1.0 |
 | `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0; TCP timeout bounds connect + send, AGNOS reply-source filter 0.6.2; AGNOS executed, send deadline + no-connection errors 0.7.0; per-socket AGNOS state, fd validation 0.7.1 |
-| `dns` | `taar_resolve_ipv4` — resolver discovery, RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC | 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0; fail-closed resolver choice 0.6.2 |
+| `dns` | `taar_resolve_ipv4` — resolver discovery, RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC | 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0; fail-closed resolver choice 0.6.2; nameserver failover, `options timeout:` / `attempts:`, EINTR retry 0.8.0 |
 
 Planned modules and their triggers live in [`roadmap.md`](roadmap.md).
 
@@ -78,9 +78,9 @@ What is actually gated, and what is not.
   `programs/`, `tests/` (including `tests/agnos/`) and `benches/`. Lint and doc
   coverage are hard gates in the `build` job over the same files; `audit` alone
   only reports them.
-- **x86_64**: smoke round-trip; unit suite **140 passed / 0 failed** (21
+- **x86_64**: smoke round-trip; unit suite **168 passed / 0 failed** (22
   groups).
-- **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 140
+- **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 168
   passed / 0 failed. This leg exists because the 0.3.3 `sendto` defect built
   clean and only failed at runtime.
 - **Integration, Linux** (`tests/integration/tc_fallback.sh`): seven cases —
@@ -91,11 +91,19 @@ What is actually gated, and what is not.
   the checkout and runs each case under a 30 s timeout, as PID 1 of its own PID
   namespace. The job relaxes Ubuntu's AppArmor user-namespace restriction, then
   probes and warns-and-skips where namespaces are still forbidden.
+- **Resolver, Linux** (`tests/integration/resolver.sh`, same job): 15 checks,
+  each case with its own bind-mounted resolv.conf and one or more fake
+  nameservers that log every query they receive — failover from an
+  unreachable, silent, SERVFAIL, REFUSED, unroutable or truncated-and-empty
+  server; NXDOMAIN final (the next server is never asked); `options attempts:`
+  rounds and the default 2; every round asking every server; the
+  three-nameserver limit; a fresh query ID per query; and a stop/continue
+  mid-wait (EINTR) surviving on both the UDP and the TCP read.
 - **AGNOS, executed** (`tests/agnos/run.sh`, the `agnos` job): boots agnos
   1.57.19 with the gnoboot 0.9.0 loader under QEMU + OVMF — both release
   binaries checked against SHA-256s pinned in `tests/agnos/pins.sh` — with
   `tests/agnos/selftest.cyr` as `/bin/agnsh`, the kernel's first program.
-  **84 checks**, ~15 s with KVM (~23 s under TCG, `TAAR_AGNOS_TCG=1`): UDP (open, timeouts, payload-count send,
+  **86 checks**, ~16 s with KVM (~23 s under TCG, `TAAR_AGNOS_TCG=1`): UDP (open, timeouts, payload-count send,
   reply-source filter with a non-vacuity check that the forgeries arrive,
   fresh-socket peer reset), TCP (connect, send, read to EOF, recv and send
   deadlines, refused and SYN-dropped connects, no-connection errors), per-socket
@@ -140,7 +148,11 @@ field open initialises, close freeing a slot, the connect-on-connected refusal,
 the table bound, the empty-recv guard), 16 red, with the 0.7.0 set re-run
 against the rewritten arm. The green one widens the TCP table's scan bound from
 8 to 16: the slots past the table read the connection table's -1 entries as "in
-use", so nothing changes. Removing the bound outright is red.
+use", so nothing changes. Removing the bound outright is red. The 0.8.0
+resolver guards — the options clamps and number parse, the three-server bound,
+the whole-word keyword, which answers are final and which hand over, the fresh
+query ID, the attempts loop, the EINTR retries — were checked against the unit
+suite and `resolver.sh`: 18 mutations, all red.
 The Linux forged-reply case was checked the same way (unconnected `sendto`
 accepts the forgery). The exceptions are all commented in-source:
 - the `ptr >= msg_len` check in `_taar_dns_skip_name` (redundant given the
@@ -167,8 +179,10 @@ accepts the forgery). The exceptions are all commented in-source:
 - **AGNOS fds are taar's, not the kernel's, for TCP**: 64..71, eight at most
   (the kernel's conn table). UDP fds are the kernel listener id, 0..7.
 - **Resolve waits are bounded per call, not per resolve** — no monotonic clock
-  in the consumers' stdlib. Worst case UDP 8 × 5 s; the TCP retry 5 s connect +
-  16 reads × 5 s.
+  in the consumers' stdlib. Per server, UDP 8 receives × the timeout, then a
+  TCP retry of a connect + 16 reads × the timeout; times up to three servers,
+  times `attempts` (default 2). A dead server costs milliseconds and a silent
+  one one timeout; the product is the long tail.
 - **resolv.conf missing or unreadable → 8.8.8.8.** A file naming only resolvers
   taar cannot use fails closed (0.6.2); the missing-file default is an open
   decision (glibc / musl use 127.0.0.1).

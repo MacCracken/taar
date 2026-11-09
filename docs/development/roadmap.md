@@ -18,9 +18,9 @@ Hardening of what already ships is not growth and does not wait on a consumer.
 
 Since 0.7.0 the AGNOS arm executes: `tests/agnos/run.sh` boots a pinned agnos
 kernel under QEMU and runs `tests/agnos/selftest.cyr` against it, in CI. What
-remains is where the AGNOS arm still differs from the Linux one. Each item now
-waits on an upstream change: two on cyrius stdlib wrappers for ABI agnos
-already ships, one on agnos itself.
+remains is where the AGNOS arm still differs from the Linux one. Each item
+waits on an upstream change, all filed: cyrius stdlib wrappers for ABI agnos
+already ships, and two agnos issues (epoll lifetime, UDP queueing).
 
 - **AGNOS EOF vs reset.** `sock_recv#49` answers -1 for a clean EOF *and* for
   a reset / dead conn, so `taar_tcp_recv` reports both as 0 ("peer closed")
@@ -30,12 +30,19 @@ already ships, one on agnos itself.
   `EPOLLIN | EPOLLERR | EPOLLHUP` for a conn that died (RST or retransmit
   exhaustion) and `EPOLLRDHUP` for the peer's FIN. So when #49 says -1, taar
   can ask the conn's readiness and return `_TAAR_ERR_RESET` (or -ECONNRESET)
-  for the first. Keep one epoll instance per process: agnos never frees an
-  instance's watch list, so one per call leaks kernel heap. *Waits on:* cyrius's
-  agnos peer for the `epoll_ctl` op-3 target and the `EP_TCP` / `EPOLL*`
-  constants — cyrius issue `2026-11-04-agnos-epoll-timeout-epollout-tcp-ids-peer.md`,
-  open. (Issuing the 4-argument calls with taar's own constants would work, but
-  CLAUDE.md's rule is the stdlib wrapper.)
+  for the first. *Waits on:*
+  - cyrius's agnos peer for the `epoll_ctl` op-3 target and the `EP_TCP` /
+    `EPOLL*` constants — cyrius issue
+    `2026-11-04-agnos-epoll-timeout-epollout-tcp-ids-peer.md`, open. (Issuing
+    the 4-argument calls with taar's own constants would work, but CLAUDE.md's
+    rule is the stdlib wrapper.)
+  - agnos freeing epoll instances — filed as agnos issue
+    `2026-11-09-an-epoll-instance-is-never-freed-so-short-lived-ones-run-the-heap-dry.md`.
+    Today an instance's watch list is never freed (1.69 M create/close pairs
+    exhaust the kernel heap in 18 s), so taar could only use one process-wide
+    instance, which is shared state 0.7.1 just removed. The issue also asks for
+    the narrower fix: a distinct `sock_recv#49` answer for a dead connection,
+    which would need no epoll at all.
 - **AGNOS connect deadline.** taar's AGNOS connect is bounded by the kernel's
   ~8 s whatever `taar_tcp_set_timeout_ms` asked for (Linux honours it), and the
   harness pins that ~8 s. agnos 1.57.18 added the deadline: `SC_TIMED` (bit 32
@@ -53,20 +60,23 @@ already ships, one on agnos itself.
 ## 0.8.x — stub-resolver completeness
 
 `taar_resolve_ipv4` against what glibc and musl stubs do. All of these are
-testable on Linux with the existing unit + `unshare -rn` harness.
+testable on Linux with the unit suite and `tests/integration/` (0.8.0 added
+`resolver.sh`, with several fake nameservers per case). 0.8.0 shipped
+nameserver failover with `options timeout:` / `attempts:`, and the EINTR retry.
 
-- **Nameserver failover.** taar uses the first usable `nameserver` only; glibc
-  and musl try up to three, in order, on timeout / SERVFAIL / refusal, and honour
-  `options timeout:` / `attempts:`. *Ready.*
-- **A total resolve deadline.** Waits are bounded per call today: UDP 8 replies
-  × 5 s, TCP 16 reads × 5 s plus a 5 s connect. One deadline per resolve needs a
+- **Answer owner-name validation (next: 0.8.1).** `_taar_dns_first_a` takes the
+  first class-IN A record without checking its owner against the QNAME or the
+  CNAME chain (or the reply's OPCODE). glibc checks; musl does not. Matters only
+  against a broken or hostile configured resolver. *Ready.*
+- **A total resolve deadline.** Waits are bounded per call today, and 0.8.0's
+  failover multiplies them: per server, 8 UDP receives × the timeout, then a
+  TCP retry of 16 reads × the timeout plus its connect, for each of up to three
+  servers, for each of `attempts` rounds. The common cases are short (a dead
+  server fails in milliseconds, a silent one at one timeout); the bound is the
+  long tail. One deadline per resolve needs a
   monotonic clock, which only `chrono` provides on Linux — and `yo` / `dig` do
   not carry it, so taar cannot depend on it (CLAUDE.md). *Waits on:* a clock in
   the `syscalls` leaf upstream, or every consumer carrying `chrono`.
-- **Answer owner-name validation.** `_taar_dns_first_a` takes the first class-IN
-  A record without checking its owner against the QNAME or the CNAME chain (or
-  the reply's OPCODE). glibc checks; musl does not. Matters only against a broken
-  or hostile configured resolver. *Ready.*
 - **Decision: the fallback when resolv.conf is missing or unreadable.** taar
   uses 8.8.8.8 (deliberate for AGNOS, where a kernel lease is tried first); glibc
   and musl use 127.0.0.1 on Linux. 0.6.2 already fails closed when the file names
@@ -77,11 +87,14 @@ testable on Linux with the existing unit + `unshare -rn` harness.
   echo, so it would be enforced — or compare the echo case-insensitively for
   resolvers that canonicalise case. Not both. *Waits on:* research into which
   resolvers in the consumers' deployments preserve case.
-- **Retry the UDP wait on EINTR.** With SO_RCVTIMEO set, Linux does not restart
-  `recvfrom` after a signal, so a consumer's signal ends the resolve. *Ready.*
 - **Detect oversize datagrams.** A UDP reply over 2 KB is cut silently (no
   `MSG_TRUNC`) and parsed as if whole. Memory-safe; compliant servers stay under
   512 bytes because taar sends no EDNS OPT. *Ready, low value.*
+- **Search domains.** `search` / `domain` and `options ndots:` are ignored:
+  names are resolved exactly as given, never with a suffix appended. glibc and
+  musl try short names against the search list. *Waits on:* a consumer that
+  resolves short names (none does: whirl takes hosts from URLs, dig is
+  explicit).
 - **Decision: `ipv4_parse` leading zeros.** `010.1.1.1` parses as decimal
   10.1.1.1 where `inet_aton(3)` reads octal 8.1.1.1. Harmless while callers use
   the packed value; a caller that validates a string here and re-parses it with
@@ -126,12 +139,13 @@ Grown only when the named trigger fires.
 
 Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
 
-- **Bump to 0.7.1** — matters to `whirl`, whose AGNOS transport is live:
-  its sends become bounded by the 10 s deadline it already sets (they were
-  not — its 1000-try loop on a 0 return could wait hours), a recv with no
-  connection is an error rather than a clean close (0.7.0), and its resolve no
-  longer shares socket state with its HTTP connection (0.7.1). `yo` and `dig`
-  use only `ipv4`, which is unchanged.
+- **Bump to 0.8.0** — matters to `whirl`, the one consumer of `socket` and
+  `dns`. On AGNOS its sends become bounded by the 10 s deadline it already
+  sets (they were not — its 1000-try loop on a 0 return could wait hours), a
+  recv with no connection is an error rather than a clean close (0.7.0), and
+  its resolve no longer shares socket state with its HTTP connection (0.7.1).
+  On both targets its lookups fail over across resolv.conf's nameservers and
+  survive a signal (0.8.0). `yo` and `dig` use only `ipv4`, which is unchanged.
 - **`dig` onto taar's `socket` and `dns`.** The `socket` fold trigger fired at
   dig 0.3.7, when dig wrote its own connect-then-write UDP transport — the same
   RFC 5452 reasoning as `taar_udp_send`, rediscovered. The fold runs the other

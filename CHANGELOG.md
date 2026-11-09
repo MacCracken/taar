@@ -4,6 +4,106 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-09
+
+Stub-resolver failover. `taar_resolve_ipv4` now handles a nameserver that is
+down, silent or failing the way the glibc and musl stubs do: it asks the
+others in resolv.conf, and honours the file's `options timeout:` and
+`attempts:`.
+
+### Added
+
+- **Nameserver failover.** Up to three nameservers from resolv.conf are asked
+  in file order, for `attempts` rounds.
+  - **Final answers:** NOERROR and NXDOMAIN stop the resolve.
+  - **Handed to the next server:** no matching reply, a send error, SERVFAIL,
+    REFUSED, NOTIMP or FORMERR, or a truncated reply with no answer whose TCP
+    retry also failed.
+
+  Before, taar asked only the first usable nameserver, and any server failure
+  ended the resolve.
+- **`options timeout:N` and `attempts:N`** in resolv.conf. The defaults are
+  5 s and 2, capped at 30 s and 5, which are glibc's values, and 0 is raised
+  to 1. Several `options` lines combine, and a later value wins. Other options
+  are ignored.
+- **A fresh random query ID for every server asked**, rather than one ID per
+  resolve.
+- **`_TAAR_ERR_INTR`** (-4, Linux's -EINTR) next to `_TAAR_ERR_TIMEOUT` in
+  `socket`.
+
+### Fixed
+
+- **A signal no longer ends a resolve.** With SO_RCVTIMEO set, Linux fails an
+  interrupted `recvfrom`/`read` with EINTR instead of restarting it, even
+  after a bare SIGSTOP/SIGCONT with no handler, and taar took that as "no
+  reply". Both the UDP wait and the TCP retry's reads now retry. Each retry
+  counts against their existing budgets (8 replies, 16 reads), so the wait
+  stays bounded. The AGNOS arm never returns EINTR.
+
+### Changed
+
+- **The default pace follows libc.** A single silent nameserver used to fail
+  after 5 s; with the default 2 attempts it now fails after 10 s.
+  `options attempts:1` restores the old pace. A dead nameserver (ICMP
+  unreachable) still fails in milliseconds and hands over at once. The TCP
+  retry uses the same per-query timeout, where it used to have its own fixed
+  5 s.
+- **Where taar differs from glibc** (documented on `taar_resolve_ipv4` and in
+  the roadmap):
+  - it takes the first three *usable* IPv4 servers, where glibc takes the
+    first three entries of any family;
+  - the per-query timeout stays fixed across rounds, where glibc doubles it;
+  - `RES_OPTIONS` in the environment is not read;
+  - search domains are not applied.
+- **Internals:** `_taar_resolv_parse`, `_choose` and `_discover` fill a
+  48-byte config block. The `resolv_parse` bench row went from 317 to about
+  600 ns, because the parser now reads the whole file for `options` instead of
+  stopping at the first nameserver.
+
+### Tests
+
+- **Unit suite: 140 → 168**, with a new `resolv-conf` group covering three
+  servers in order, a fourth ignored, unusable entries not counted, and the
+  defaults, values, clamps, malformed values, CRLF and whole-word keywords of
+  `options`, plus the fallback and the kernel lease.
+- **New `tests/integration/resolver.sh`: 15 checks.** Each case runs in its
+  own namespace with a bind-mounted resolv.conf and several fake nameservers,
+  each logging the queries it receives. It covers:
+  - failover from an unreachable, silent, SERVFAIL, REFUSED, unroutable or
+    truncated-and-empty server;
+  - NXDOMAIN being final, so the next server is never asked;
+  - `attempts` rounds, the default of 2, and every round asking every server;
+  - the three-server limit;
+  - a fresh ID per query;
+  - EINTR surviving on both the UDP and the TCP read.
+
+  `fake_dns.py` gains `servfail`, `refused`, `nxdomain`, `silent`, `slow`,
+  `tc_slow` and `tc_empty` modes, plus `--addr` and `--log`. The CI
+  integration job runs the script.
+- **Mutation:** 18 mutations of the new guards, all red. One is worth
+  recording: with the EINTR retry removed, the client still printed the right
+  address, because the second round asked again. Only the asserted query
+  count (2 instead of 1) caught it.
+- **AGNOS harness: 84 → 86 checks.** The kernel lease is checked as a
+  single-server config with the default attempts. The full set passes with
+  the new resolver loop.
+
+### Documentation
+
+- Filed with agnos, in its `docs/development/issues/`:
+  `2026-11-09-an-epoll-instance-is-never-freed-so-short-lived-ones-run-the-heap-dry.md`.
+  - **The defect:** an epoll instance's watch list is never freed. Measured
+    on 1.57.19: 1,690,592 create/close pairs in 17.9 s use up the kernel
+    heap, and `epoll_create` fails for good after that. Any unprivileged
+    process can do it.
+  - **The fix it suggests:** the pipe buffer's existing last-reference free.
+  - **Also asked:** a distinct `sock_recv#49` answer for a dead connection,
+    which would give taar its reset-vs-EOF bit with no epoll at all.
+
+  The roadmap's reset item now waits on it and on cyrius's epoll peer.
+- Roadmap: failover and the EINTR retry are done. Owner-name validation is
+  next (0.8.1), and search domains are recorded as not handled.
+
 ## [0.7.1] - 2026-11-09
 
 Per-socket state on AGNOS, the first 0.7.x parity item. The AGNOS arm kept

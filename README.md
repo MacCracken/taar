@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.7.1.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.8.0.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -59,7 +59,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.7.1"
+tag = "0.8.0"
 modules = ["dist/taar.cyr"]
 ```
 
@@ -81,7 +81,7 @@ Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.7.18`); run
 
 ```sh
 cyrius audit                                        # fmt + lint + docs + tests + bench
-cyrius test tests/                                  # tests/taar.tcyr — 140 assertions
+cyrius test tests/                                  # tests/taar.tcyr — 168 assertions
 cyrius test --aarch64 tests/                        # same suite on aarch64 (needs qemu-user)
 cyrius bench benches/                               # codec / parser timings
 cyrius build programs/smoke.cyr build/taar-smoke    # compiles + round-trips an address
@@ -104,6 +104,15 @@ runs in CI:
 
 ```sh
 tests/integration/tc_fallback.sh
+```
+
+Nameserver failover gets the same treatment, with several fake nameservers
+per case behind a private `resolv.conf`: a dead, silent, SERVFAIL or REFUSED
+server hands over to the next, NXDOMAIN does not, `options timeout:` /
+`attempts:` are honoured, and a resolve survives a stop/continue mid-wait:
+
+```sh
+tests/integration/resolver.sh
 ```
 
 The AGNOS backend is executed on the AGNOS kernel itself. The harness boots a

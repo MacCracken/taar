@@ -337,45 +337,62 @@ fn _t_put(dst, s): i64 {
     return i;
 }
 
+var _t_cfg: i64[6];            # a resolver config block (48 bytes)
+
+# _taar_resolv_parse into a scratch config: the first nameserver when the text
+# has a usable one, else the parse result (0 = none named, -1 = none usable).
+fn _t_first(b, n): i64 {
+    var r = _taar_resolv_parse(b, n, &_t_cfg);
+    if (r > 0) { return load64(&_t_cfg); }
+    return r;
+}
+
+# _taar_resolv_choose into a scratch config: the first nameserver chosen, or
+# 0 when the resolve must fail closed.
+fn _t_choose(ksrv, b, n, cap): i64 {
+    if (_taar_resolv_choose(ksrv, b, n, cap, &_t_cfg) <= 0) { return 0; }
+    return load64(&_t_cfg);
+}
+
 # === resolv.conf: the parser sees file contents DHCP clients write ===
 fn test_resolv_parse() {
     test_group("resolv-parse");
     var b = alloc(512);
     var n = _t_put(b, "nameserver 192.168.1.1\n");
-    assert_eq(_taar_resolv_parse(b, n), 0xC0A80101, "plain nameserver");
+    assert_eq(_t_first(b, n), 0xC0A80101, "plain nameserver");
     n = _t_put(b, "# managed\n; legacy comment\nsearch lan\n\n  \tnameserver\t10.0.0.53  # trailing\n");
-    assert_eq(_taar_resolv_parse(b, n), 0x0A000035, "comments, blank line, tab separator");
+    assert_eq(_t_first(b, n), 0x0A000035, "comments, blank line, tab separator");
     n = _t_put(b, "nameserver 1.1.1.1");
-    assert_eq(_taar_resolv_parse(b, n), 0x01010101, "no trailing newline");
+    assert_eq(_t_first(b, n), 0x01010101, "no trailing newline");
     n = _t_put(b, "nameserver 9.9.9.9\nnameserver 1.1.1.1\n");
-    assert_eq(_taar_resolv_parse(b, n), 0x09090909, "first nameserver wins");
+    assert_eq(_t_first(b, n), 0x09090909, "first nameserver is asked first");
     n = _t_put(b, "nameserver ::1\nnameserver 192.0.2.7\n");
-    assert_eq(_taar_resolv_parse(b, n), 0xC0000207, "IPv6 entry skipped for a later IPv4");
+    assert_eq(_t_first(b, n), 0xC0000207, "IPv6 entry skipped for a later IPv4");
     # CRLF files (written on, or copied from, Windows) end each token with a CR.
     n = _t_put(b, "nameserver 1.2.3.4\r\n");
-    assert_eq(_taar_resolv_parse(b, n), 0x01020304, "CRLF line ending");
+    assert_eq(_t_first(b, n), 0x01020304, "CRLF line ending");
     # 0.0.0.0 used to stop the scan as "found" and then read as "none".
     n = _t_put(b, "nameserver 0.0.0.0\nnameserver 192.0.2.9\n");
-    assert_eq(_taar_resolv_parse(b, n), 0xC0000209, "0.0.0.0 skipped for a later server");
+    assert_eq(_t_first(b, n), 0xC0000209, "0.0.0.0 skipped for a later server");
     # The keyword must be a whole word.
     n = _t_put(b, "nameservers 8.8.4.4\n");
-    assert_eq(_taar_resolv_parse(b, n), 0, "nameserverS is not the keyword");
+    assert_eq(_t_first(b, n), 0, "nameserverS is not the keyword");
     # 0 = the file names no nameserver at all.
     n = _t_put(b, "search lan\noptions edns0\n");
-    assert_eq(_taar_resolv_parse(b, n), 0, "no nameserver line");
-    assert_eq(_taar_resolv_parse(b, 0), 0, "empty file");
+    assert_eq(_t_first(b, n), 0, "no nameserver line");
+    assert_eq(_t_first(b, 0), 0, "empty file");
     n = _t_put(b, "nameserver\n");
-    assert_eq(_taar_resolv_parse(b, n), 0, "keyword with no address is not an entry");
+    assert_eq(_t_first(b, n), 0, "keyword with no address is not an entry");
     # -1 = it names nameservers, none of them usable over IPv4. Distinct from 0,
     # because the caller must not treat a configured resolver as a missing one.
     n = _t_put(b, "nameserver ::1\nnameserver fe80::1%eth0\n");
-    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "IPv6-only file is configured, not empty");
+    assert_eq(_t_first(b, n), 0 - 1, "IPv6-only file is configured, not empty");
     n = _t_put(b, "nameserver 0.0.0.0\n");
-    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "0.0.0.0 is not a usable server");
+    assert_eq(_t_first(b, n), 0 - 1, "0.0.0.0 is not a usable server");
     n = _t_put(b, "nameserver 10.0.0.256\n");
-    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "malformed address is not usable");
+    assert_eq(_t_first(b, n), 0 - 1, "malformed address is not usable");
     n = _t_put(b, "nameserver 1111111111111111111111111111111111111111111111111111111111111111111\n");
-    assert_eq(_taar_resolv_parse(b, n), 0 - 1, "over-long token refused, not copied");
+    assert_eq(_t_first(b, n), 0 - 1, "over-long token refused, not copied");
     return 0;
 }
 
@@ -384,27 +401,90 @@ fn test_resolv_choose() {
     test_group("resolv-choose");
     var b = alloc(512);
     var n = _t_put(b, "nameserver 192.168.1.1\n");
-    assert_eq(_taar_resolv_choose(0x0A000001, b, n, 512), 0x0A000001, "kernel-leased server wins");
-    assert_eq(_taar_resolv_choose(0, b, n, 512), 0xC0A80101, "file server used");
-    assert_eq(_taar_resolv_choose(0, b, 0 - 2, 512), _TAAR_RESOLV_FALLBACK, "no file: public fallback");
+    assert_eq(_t_choose(0x0A000001, b, n, 512), 0x0A000001, "kernel-leased server wins");
+    assert_eq(_t_choose(0, b, n, 512), 0xC0A80101, "file server used");
+    assert_eq(_t_choose(0, b, 0 - 2, 512), _TAAR_RESOLV_FALLBACK, "no file: public fallback");
     n = _t_put(b, "search lan\n");
-    assert_eq(_taar_resolv_choose(0, b, n, 512), _TAAR_RESOLV_FALLBACK, "no nameserver: public fallback");
+    assert_eq(_t_choose(0, b, n, 512), _TAAR_RESOLV_FALLBACK, "no nameserver: public fallback");
     # A host whose resolv.conf names only IPv6 resolvers has a DNS config taar
     # cannot use. Sending its lookups to 8.8.8.8 instead would bypass the
     # resolver the host chose (VPN, split-horizon, filtering) and disclose every
     # hostname to a third party. Fail closed.
     n = _t_put(b, "nameserver ::1\n");
-    assert_eq(_taar_resolv_choose(0, b, n, 512), 0, "IPv6-only: fail closed, no public fallback");
+    assert_eq(_t_choose(0, b, n, 512), 0, "IPv6-only: fail closed, no public fallback");
     # A read that filled the buffer may have cut the last line mid-address:
     # "nameserver 10.0.0.12" read as "nameserver 10.0.0.1" is a valid but WRONG
     # server. The partial line is dropped and, with nothing complete left, the
     # resolve fails closed rather than guessing.
     n = _t_put(b, "# big file\nnameserver 10.0.0.12\n");
     var cut = n - 2;                               # ends "...10.0.0.1"
-    assert_eq(_taar_resolv_choose(0, b, cut, cut), 0, "cut nameserver line: not used, fail closed");
+    assert_eq(_t_choose(0, b, cut, cut), 0, "cut nameserver line: not used, fail closed");
     n = _t_put(b, "nameserver 172.16.0.1\nnameserver 10.0.0.12\n");
     cut = n - 2;
-    assert_eq(_taar_resolv_choose(0, b, cut, cut), 0xAC100001, "complete line before the cut still used");
+    assert_eq(_t_choose(0, b, cut, cut), 0xAC100001, "complete line before the cut still used");
+    return 0;
+}
+
+# === resolv.conf: several nameservers, and the options that pace them ===
+fn test_resolv_conf() {
+    test_group("resolv-conf");
+    var b = alloc(512);
+    var c = &_t_cfg;
+    var n = _t_put(b, "nameserver 10.0.0.1\nnameserver 10.0.0.2\nnameserver 10.0.0.3\nnameserver 10.0.0.4\n");
+    assert_eq(_taar_resolv_parse(b, n, c), 3, "three nameservers used, the fourth ignored (glibc MAXNS)");
+    assert_eq(load64(c), 0x0A000001, "first in file order");
+    assert_eq(load64(c + 8), 0x0A000002, "second in file order");
+    assert_eq(load64(c + 16), 0x0A000003, "third in file order");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_COUNT), 3, "count stored");
+    # Unusable entries do not use up the three.
+    n = _t_put(b, "nameserver ::1\nnameserver 10.0.0.9\nnameserver 0.0.0.0\nnameserver 10.0.0.8\n");
+    assert_eq(_taar_resolv_parse(b, n, c), 2, "IPv6 and 0.0.0.0 skipped, not counted");
+    assert_eq(load64(c + 8), 0x0A000008, "the IPv4 after them is second");
+    n = _t_put(b, "nameserver ::1\nnameserver ::2\nnameserver ::3\nnameserver 192.0.2.1\n");
+    assert_eq(_t_first(b, n), 0xC0000201, "three IPv6 entries do not hide a fourth IPv4 one");
+    # Defaults: glibc's 5 s and 2 attempts.
+    n = _t_put(b, "nameserver 10.0.0.1\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 5000, "default timeout 5 s");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_ATTEMPTS), 2, "default attempts 2");
+    # options, among others taar ignores.
+    n = _t_put(b, "nameserver 10.0.0.1\noptions edns0 timeout:2 rotate attempts:3 trust-ad\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 2000, "options timeout:2");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_ATTEMPTS), 3, "options attempts:3");
+    n = _t_put(b, "options timeout:1\r\nnameserver 10.0.0.1\r\noptions attempts:4\r\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 1000, "options before the nameservers, CRLF");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_ATTEMPTS), 4, "a second options line adds to the first");
+    n = _t_put(b, "options timeout:2\noptions timeout:7\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 7000, "a later timeout overrides");
+    # Clamped as glibc clamps, with 0 raised to 1.
+    n = _t_put(b, "options timeout:0 attempts:0\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 1000, "timeout:0 raised to 1 s");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_ATTEMPTS), 1, "attempts:0 raised to 1");
+    n = _t_put(b, "options timeout:99 attempts:9\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 30000, "timeout capped at 30 s");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_ATTEMPTS), 5, "attempts capped at 5");
+    # Malformed values leave the defaults.
+    n = _t_put(b, "options timeout: timeout:2s attempts:x timeout:1234567 attempts:-1\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 5000, "malformed timeouts ignored");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_ATTEMPTS), 2, "malformed attempts ignored");
+    n = _t_put(b, "optionsx timeout:1\n#options timeout:1\noptions\ttimeout:3\n");
+    _taar_resolv_parse(b, n, c);
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 3000, "keyword must be a whole word; tab separates");
+    # The fallback keeps the file's options; a kernel lease takes the defaults.
+    n = _t_put(b, "options timeout:3\n");
+    assert_eq(_taar_resolv_choose(0, b, n, 512, c), 1, "no nameserver: one fallback server");
+    assert_eq(load64(c), _TAAR_RESOLV_FALLBACK, "... the public fallback");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 3000, "... paced by the file's options");
+    assert_eq(_taar_resolv_choose(0x0A000001, b, n, 512, c), 1, "kernel lease: one server");
+    assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 5000, "... with the default timeout");
+    n = _t_put(b, "nameserver 10.0.0.1\nnameserver 10.0.0.2\n");
+    assert_eq(_taar_resolv_choose(0, b, n, 512, c), 2, "file servers: all of them");
     return 0;
 }
 
@@ -582,6 +662,7 @@ fn main() {
     test_socket_recv_contract();
     test_resolv_parse();
     test_resolv_choose();
+    test_resolv_conf();
     test_dns_encode_bounds();
     test_dns_answer_class();
     test_dns_tcp_read_cap();

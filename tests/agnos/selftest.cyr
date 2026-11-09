@@ -114,7 +114,10 @@ fn ag_lease() {
         i = i + 1;
     }
     _ag_eq(ns, _AG_DNS, "lease: kernel DHCP lease is the user-net DNS forwarder");
-    _ag_eq(_taar_resolv_discover(), _AG_DNS, "lease: discovery prefers the kernel lease");
+    var cfg[48];
+    _ag_eq(_taar_resolv_discover(&cfg), 1, "lease: discovery takes the kernel lease alone");
+    _ag_eq(load64(&cfg), _AG_DNS, "lease: ... and it is the user-net DNS forwarder");
+    _ag_eq(load64(&cfg + _TAAR_RESOLV_CFG_ATTEMPTS), 2, "lease: ... with the default attempts");
     return 0;
 }
 
