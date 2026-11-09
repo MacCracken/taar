@@ -70,6 +70,9 @@ address codecs, socket I/O, packet construction, and DNS.
    defect built clean on aarch64 and only failed when executed.
 4. `CYRIUS_TARGET_AGNOS=1 cyrius build --agnos src/main.cyr` compiles.
 5. Touched the DNS path? `tests/integration/tc_fallback.sh`.
+   Touched `src/socket.cyr` or `src/dns.cyr`? `tests/agnos/run.sh` too — it
+   boots agnos under QEMU and is the only place the AGNOS arm executes. A
+   mutation of that arm is checked there, not in `tests/taar.tcyr`.
 6. `cyrius distlib` to regenerate `dist/taar.cyr` (+ `dist/taar.deps`).
 7. Update `CHANGELOG.md` and `docs/development/state.md`; prune anything the
    change made stale.
@@ -77,6 +80,12 @@ address codecs, socket I/O, packet construction, and DNS.
 New guards get a test, and the test gets **mutation-checked** — remove the
 guard, confirm the suite goes red. A guard whose removal changes nothing is
 either redundant (say so in a comment) or untested.
+
+**AGNOS kernel behaviour taar relies on, or works around, gets a check** in
+`tests/agnos/selftest.cyr`, labelled `kernel:` when it is a canary rather than
+a taar guard (the one-datagram UDP slot is the first). The harness boots the
+agnos release pinned by SHA-256 in `tests/agnos/pins.sh`; a bump is a new test
+environment, so bump deliberately and record it in the CHANGELOG.
 
 **Check the consumer before parking an item as "breaking".** The AGNOS
 `taar_tcp_recv` fix sat parked for two releases on the belief it would break

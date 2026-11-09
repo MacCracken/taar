@@ -4,6 +4,123 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-09
+
+The AGNOS backend runs. Until now `src/socket.cyr`'s `#ifdef
+CYRIUS_TARGET_AGNOS` arm had only ever been compiled. A new harness boots
+the agnos kernel and executes it. Its first runs found two defects, and
+reading `whirl` against the results found what one of them cost a
+consumer.
+
+### Added
+
+- **`tests/agnos/run.sh` — AGNOS execution harness.**
+  - **Boot chain:** the agnos 1.57.19 kernel and the gnoboot 0.9.0 UEFI
+    loader, fetched from their GitHub releases. Each must match a SHA-256
+    pinned in `tests/agnos/pins.sh` (both are reproducible builds,
+    byte-identical to local ones). They boot under QEMU + OVMF, using KVM
+    when it is available and TCG otherwise.
+  - **Test program:** `tests/agnos/selftest.cyr`, built from the checkout on
+    every run and installed as `/bin/agnsh`, which the kernel runs as its
+    first program. No shell, no keystrokes, no change to agnos.
+  - **Network:** QEMU's user-mode network reaches host-side socket peers
+    (`tests/agnos/peers.py`) and the fake resolver (`fake_dns.py bylabel`).
+    Both run inside a private user + network + mount + PID namespace, whose
+    bind-mounted resolv.conf points QEMU's DNS forwarder at the fake. No root
+    and no real network.
+  - **Results:** 53 checks in about 15 s. Exit 2 means a prerequisite was
+    missing, and the harness says nothing was tested; it never reads as a
+    pass.
+- **What it covers.** Three of the four 0.6.2 AGNOS changes now run:
+  - the reply-source filter;
+  - timeout 0 meaning no deadline;
+  - `udp_send` returning the payload count.
+
+  The fourth, the DNS retry's one-spin send cap, is superseded: with a
+  deadline set, an AGNOS send now ends in `_TAAR_ERR_TIMEOUT` rather than 0,
+  so the cap no longer fires there.
+
+  Also covered:
+  - UDP open, timeout, send, receive and close;
+  - a fresh socket accepting any sender until its first send;
+  - TCP connect, send, read to EOF and close;
+  - the receive and send deadlines;
+  - refused connects and connects whose SYNs are dropped;
+  - `taar_resolve_ipv4` end to end through the kernel's DHCP lease: TC=0,
+    the TC retry, three TCP-failure fallbacks, and a forged reply.
+
+  The filter check is not vacuous. A raw-receive check proves both
+  forgeries really reach the guest, and it also pins the kernel's
+  `addr_out` layout (ip at +0, port at +8), which the filter reads.
+- **CI `agnos` job** runs the harness on every push and PR (installs QEMU +
+  OVMF, enables KVM).
+- **A kernel canary.** An AGNOS UDP listener holds one unread datagram, and
+  each arrival overwrites it (`net_handle_udp`). Linux queues them. taar now
+  documents what that costs: a datagram landing after the real DNS reply, but
+  before the next poll, evicts the reply and the resolve times out, though
+  never with a wrong answer. A selftest check goes red if a kernel bump
+  changes the behaviour.
+- **`fake_dns.py` gains `spoof` and `bylabel` modes.** The Linux integration
+  script adds a forged-reply case (seven cases), so both backends face the
+  same forgery.
+
+### Fixed (AGNOS)
+
+- **`taar_tcp_send` honours the socket's deadline.** It was a bare
+  `sock_send#48`, which ignores the timeout and returns 0 after about 8 s
+  with no progress. Now:
+  - it sends through `sock_send_dl#109` (agnos ≥ 1.57.13, probed once) with
+    the deadline from `taar_tcp_set_timeout_ms`;
+  - nothing sent by the deadline is `_TAAR_ERR_TIMEOUT`, as SO_SNDTIMEO makes
+    Linux return;
+  - with no deadline set it waits for progress, as a blocking write does;
+  - an empty send returns 0.
+
+  This is the defect a consumer felt: whirl's send loop treats 0 as "not
+  yet" and retries up to 1000 times, so on AGNOS a peer that stopped reading
+  could hold an upload for hours. Linux would have cut it off at whirl's
+  10 s. The harness measured the old path at 8002 ms per call with a 500 ms
+  deadline.
+- **`taar_tcp_recv` with no connection returns -1, not 0.** The kernel
+  answers -1 for conn -1, and taar maps -1 to "peer closed". So a socket that
+  never connected, or was already closed, read as a clean hang-up. (The
+  roadmap's no-connection guard.) `taar_tcp_send` gets the same guard. Today
+  the kernel refuses conn -1 by itself, so mutation shows that guard is
+  redundant; it is kept so the contract does not rest on kernel behaviour,
+  and is commented as such.
+
+### Changed
+
+- `taar_tcp_set_timeout_ms` (AGNOS) now bounds recv **and send**. The connect
+  is still bounded only by the kernel's ~8 s: `sock_connect#47` has no
+  deadline form (new roadmap item).
+- The integration scripts run each case as PID 1 of its own PID namespace
+  (`--pid --fork --kill-child`), so a timed-out case cannot leave servers
+  running.
+- CI: the integration and agnos jobs relax Ubuntu 24.04's AppArmor
+  restriction on unprivileged user namespaces, which otherwise makes the
+  probe skip the cases. The lint, doc-coverage and syscall-literal gates now
+  cover `tests/agnos/`.
+
+### Documentation
+
+- `src/socket.cyr`'s AGNOS header gains note 5 (the one-datagram slot) and
+  note 6 (which deadlines the kernel can honour), and names the harness.
+- Roadmap: 0.7.x is now *AGNOS parity*. Per-socket state is unblocked, and
+  can perhaps sit on the stdlib's own AGNOS socket adapter. New items cover
+  the connect deadline and the one-datagram slot. The consumer bump past
+  0.5.0 is done and removed.
+
+### Not verified
+
+- The send probe's fallback for kernels older than agnos 1.57.13 is not in
+  CI, because the harness boots 1.57.19. It was run once by hand against agnos
+  1.57.12 (`TAAR_AGNOS_KERNEL`): 52 of 53 checks pass. The one red check is the
+  500 ms send deadline, which on that kernel takes `#48`'s own ~8 s before
+  ending in `_TAAR_ERR_TIMEOUT`, as documented.
+- aarch64 AGNOS is still compile-only: agnos does not boot there yet.
+- The CI `agnos` job has not yet run on GitHub's runners.
+
 ## [0.6.2] - 2026-11-08
 
 A P(-1) review of everything taar ships: 17 findings, none critical or high, all

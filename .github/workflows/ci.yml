@@ -47,7 +47,7 @@ jobs:
         # Hard gate: any `warn` line fails CI (matches patra / sigil / agnosys).
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/*.tcyr benches/*.bcyr; do
+          for f in src/*.cyr programs/*.cyr tests/*.tcyr tests/agnos/*.cyr benches/*.bcyr; do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
             if echo "$out" | grep -qE '^[[:space:]]*warn '; then
@@ -63,7 +63,7 @@ jobs:
         # reports the count but does not fail on it.
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/*.tcyr benches/*.bcyr; do
+          for f in src/*.cyr programs/*.cyr tests/*.tcyr tests/agnos/*.cyr benches/*.bcyr; do
             out=$(cyrius doc --check "$f" 2>&1 || true)
             echo "$f: $(echo "$out" | tail -1)"
             if echo "$out" | grep -q 'undocumented: '; then
@@ -88,11 +88,8 @@ jobs:
           echo "taar-smoke: $(wc -c < build/taar-smoke) bytes"
 
       - name: Build AGNOS target
-        # taar ships an AGNOS backend as a headline feature, but nothing here
-        # compiled it until 0.5.0 — a break in the #ifdef arm would have landed
-        # silently. This only proves the arm COMPILES and is actually selected
-        # (its image must differ from the Linux one); nothing executes it. See
-        # docs/development/roadmap.md, "Executed coverage for the AGNOS backend".
+        # A fast compile-and-selected check (the image must differ from the
+        # Linux one). The `agnos` job below is what EXECUTES the arm.
         run: |
           CYRIUS_TARGET_AGNOS=1 cyrius build --agnos src/main.cyr build/taar-agnos
           cyrius build src/main.cyr build/taar-linux-ref
@@ -164,6 +161,11 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 24.04's AppArmor policy blocks them by default; without this
+        # the probe below fails and the cases are skipped on GitHub's runners.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Probe for unprivileged user+net namespaces
         id: probe
         # The harness binds 127.0.0.53:53, which needs CAP_NET_BIND_SERVICE and
@@ -171,7 +173,7 @@ jobs:
         # both without root. If a runner forbids it the cases cannot run, so
         # warn loudly rather than failing the build on a sandbox policy.
         run: |
-          if unshare -rn true 2>/dev/null; then
+          if unshare -rn --pid --fork --kill-child true 2>/dev/null; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "ok=0" >> "$GITHUB_OUTPUT"
@@ -193,6 +195,51 @@ jobs:
         if: steps.probe.outputs.ok == '1'
         run: tests/integration/tc_fallback.sh
 
+  agnos:
+    name: AGNOS backend (executed under QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_VERSION}/scripts/install.sh" | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Install QEMU, OVMF and disk-image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools parted gdisk e2fsprogs
+
+      - name: Enable KVM
+        # GitHub's Linux runners expose /dev/kvm to root only. Without it the
+        # harness falls back to TCG — same result, slower.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "no /dev/kvm: TCG"
+
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: AGNOS harness
+        # The only place src/socket.cyr's #ifdef CYRIUS_TARGET_AGNOS arm runs.
+        # Boots the agnos kernel and gnoboot loader pinned in tests/agnos/
+        # pins.sh (each SHA-256 checked) with tests/agnos/selftest.cyr as the
+        # first program, and checks the UDP, TCP and resolver contracts
+        # against host-side peers in a private namespace. Exit 2 means a
+        # prerequisite was missing and NOTHING was tested — it fails the job
+        # like any other non-zero exit, because "could not test" is not a pass.
+        run: tests/agnos/run.sh
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -206,7 +253,7 @@ jobs:
         # Named constants (`syscall(SYS_EXIT, …)`) are fine; digits are not.
         run: |
           # `^[^#]*` skips comments, which quote the historical literals.
-          if grep -nE '^[^#]*syscall\([[:space:]]*[0-9]' src/*.cyr programs/*.cyr; then
+          if grep -nE '^[^#]*syscall\([[:space:]]*[0-9]' src/*.cyr programs/*.cyr tests/agnos/*.cyr; then
             echo "error: raw syscall number above — use the stdlib's sys_* wrapper"
             exit 1
           fi

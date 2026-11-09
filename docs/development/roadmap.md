@@ -14,34 +14,40 @@ which `yo` and `dig` shipped byte-identical. Nothing in the backlog is built
 until its trigger actually fires; a plausible future need is not a trigger.
 Hardening of what already ships is not growth and does not wait on a consumer.
 
-## 0.7.x — the AGNOS backend, executed
+## 0.7.x — AGNOS parity
 
-The largest untested surface in the repo. `src/socket.cyr`'s
-`#ifdef CYRIUS_TARGET_AGNOS` arm compiles and is confirmed selected, but
-nothing runs it, so every guarantee on that target rests on review alone. 0.6.2
-made it more pressing: it shipped four AGNOS changes (the reply-source filter,
-timeout 0 = no deadline, `udp_send`'s payload count, the 1-spin send cap) whose
-logic is unit-tested on Linux but whose wiring has never executed.
+Since 0.7.0 the AGNOS arm executes: `tests/agnos/run.sh` boots a pinned agnos
+kernel under QEMU and runs `tests/agnos/selftest.cyr` against it, in CI. What
+remains is where the AGNOS arm still differs from the Linux one.
 
-- **0.7.0 — an AGNOS execution harness.** *Waits on:* the design decision — a
-  QEMU-booted agnos image in CI, or something smaller in-repo. Done when
-  `tests/taar.tcyr`'s socket groups and the TC-fallback cases run against the
-  AGNOS arm, and the four 0.6.2 changes above are exercised.
 - **Per-socket AGNOS state.** Timeout, TCP conn and UDP peer / source port are
-  module globals today, so a resolve disturbs a consumer's socket: the TC retry's
+  module globals, so a resolve disturbs a consumer's socket: the TC retry's
   `taar_tcp_open` drops a live conn without closing it (a leaked kernel slot,
-  and the consumer's next recv reads 0), `taar_resolve_ipv4` overwrites the
-  consumer's timeout, and `_taar_ag_src_port` keeps the resolver's freed port.
-  Index state by the fd taar returns. *Waits on:* 0.7.0 — a state-model rewrite
-  must not ship blind.
+  and the consumer's next recv now reads -1), `taar_resolve_ipv4` overwrites
+  the consumer's timeout, and `_taar_ag_src_port` keeps the resolver's freed
+  port. Index state by the fd taar returns. Evaluate first whether the TCP half
+  can sit on the stdlib's own AGNOS socket adapter: since cyrius 6.6.17 the
+  `syscalls` leaf taar already carries turns `sys_socket` / `sys_connect` /
+  `sys_read` / `sys_write` into tagged fds with per-socket deadlines over
+  `sock_*` and `sock_send_dl`#109. Its UDP verbs (`sys_sendto`, `sys_recvfrom`)
+  decline, so UDP state stays taar's either way. *Ready* — the harness can now
+  show the disturbance before and after.
 - **AGNOS EOF vs reset.** `sock_recv#49` answers -1 for a clean EOF *and* for
   a reset / dead conn, so `taar_tcp_recv` reports both as 0 ("peer closed")
   where Linux returns -ECONNRESET; a consumer reading to EOF can take a
   mid-body reset for a complete response. *Waits on:* the agnos kernel
   distinguishing the two (to file upstream), then a one-line map in taar.
-- **AGNOS no-connection guard.** `taar_tcp_send` / `taar_tcp_recv` pass
-  `_taar_ag_conn` even when it is -1 (never connected, or closed). Return an
-  error instead. *Waits on:* 0.7.0 (a guard needs a test).
+- **AGNOS connect deadline.** `sock_connect#47` has no deadline form, so an
+  AGNOS connect is bounded by the kernel's ~8 s whatever
+  `taar_tcp_set_timeout_ms` asked for (Linux honours it). The harness pins the
+  ~8 s bound. *Waits on:* a kernel connect-with-deadline (to file upstream).
+- **AGNOS UDP keeps one datagram.** A listener holds one unread datagram and
+  the next arrival overwrites it (`net_handle_udp`), so a stray datagram
+  landing after the real DNS reply, before taar's next 5 ms poll, evicts the
+  reply and the resolve times out. Never a wrong answer — the source filter
+  still applies — but a cheap way to fail a resolve. The harness has a canary
+  that goes red when this changes. *Waits on:* the kernel queueing datagrams
+  (to file upstream).
 
 ## 0.8.x — stub-resolver completeness
 
@@ -84,8 +90,9 @@ testable on Linux with the existing unit + `unshare -rn` harness.
 ## 0.9.x — surface freeze
 
 - **An ADR for the module / backend contract.** What every `taar_*` function
-  promises on both targets (returns, timeouts, the 0-means-closed rule), so the
-  AGNOS work above has a written contract to test against. *Ready.*
+  promises on both targets (returns, timeouts, the 0-means-closed rule), and
+  where the targets still differ (the 0.7.x items above), so the AGNOS work has
+  a written contract to test against. *Ready.*
 - **Public-surface review.** Settle names and return contracts before 1.0;
   deprecate anything not wanted. *Waits on:* 0.7.x and 0.8.x, whose fixes touch
   the surface.
@@ -94,7 +101,11 @@ testable on Linux with the existing unit + `unshare -rn` harness.
 
 - Every planned consumer (`yo`, `dig`, `whirl`, + traceroute if it lands) on
   taar with no in-tree duplication — see *Consumer migration*.
-- Every module's AGNOS backend **executed**, not merely compiled (0.7.x).
+- Every module's AGNOS backend **executed**, not merely compiled — true on
+  x86_64 since 0.7.0. aarch64 AGNOS compiles but agnos does not yet boot there
+  (its 1.6x port); executed coverage follows that boot.
+- The 0.7.x parity items closed, or each written into the contract ADR as a
+  documented target difference.
 - Frozen public surface + the contract ADR (0.9.x).
 
 ## Backlog (v1, trigger-gated)
@@ -114,9 +125,11 @@ Grown only when the named trigger fires.
 
 Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
 
-- **Bump past 0.5.0.** All three consumers pin taar 0.5.0, so none carries
-  0.6.2's resolver hardening (bounded TCP connect, no silent public-resolver
-  fallback, the AGNOS source filter).
+- **Bump to 0.7.0** — matters to `whirl`, whose AGNOS transport is live:
+  its sends become bounded by the 10 s deadline it already sets (they were
+  not — its 1000-try loop on a 0 return could wait hours), and a recv with no
+  connection is now an error rather than a clean close. `yo` and `dig` use
+  only `ipv4`, which is unchanged.
 - **`dig` onto taar's `socket` and `dns`.** The `socket` fold trigger fired at
   dig 0.3.7, when dig wrote its own connect-then-write UDP transport — the same
   RFC 5452 reasoning as `taar_udp_send`, rediscovered. The fold runs the other

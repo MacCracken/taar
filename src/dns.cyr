@@ -33,10 +33,13 @@ var _TAAR_DNS_UDP_TIMEOUT_MS = 5000;     # per receive
 # handshake on top of the query; taar_tcp_set_timeout_ms bounds the connect,
 # each send and each receive by it.
 var _TAAR_DNS_TCP_TIMEOUT_MS = 5000;
-# A send that accepts 0 bytes is "no progress yet", not an error. Linux never
-# does it on a blocking socket (SO_SNDTIMEO reports -EAGAIN instead); AGNOS
-# sock_send#48 does, after ~8 s without ACK progress. One retry, then give up:
-# this cap was 64, which let a stalled AGNOS peer hold the retry for ~8.5 min.
+# A send that accepts 0 bytes is "no progress yet", not an error. One retry,
+# then give up. Defence in depth since 0.7.0, and untested for that reason: with
+# a deadline set (this path always sets one) neither backend returns 0 for a
+# non-empty send — Linux reports SO_SNDTIMEO as -EAGAIN, and AGNOS taar_tcp_send
+# now maps the kernel's 0 to _TAAR_ERR_TIMEOUT. Through 0.6.2 AGNOS did return
+# 0 (sock_send#48, after ~8 s without progress), and a cap of 64 let a stalled
+# peer hold the retry for ~8.5 min.
 var _TAAR_DNS_TCP_MAX_SPINS  = 1;
 # Reads allowed for one framed message. Each read may wait the full receive
 # timeout, so without a cap a peer dripping one byte at a time could hold a

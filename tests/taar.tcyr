@@ -4,6 +4,8 @@
 # directly; socket contracts that need a peer use an AF_UNIX socketpair, never
 # the network. What needs a resolver — the TC retry, a filtered TCP/53 — lives
 # in tests/integration/tc_fallback.sh, inside a private network namespace.
+# Everything here runs the Linux arm of socket.cyr; the AGNOS arm executes in
+# tests/agnos/run.sh, on the agnos kernel under QEMU.
 
 include "src/ipv4.cyr"
 include "src/socket.cyr"

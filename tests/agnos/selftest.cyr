@@ -1,0 +1,414 @@
+# taar AGNOS selftest — the socket and resolver contracts, executed on the
+# AGNOS kernel.
+#
+# An AGNOS userland program, not a cyrius test file: tests/agnos/run.sh builds
+# it with `cyrius build --agnos`, installs it as /bin/agnsh on a scratch
+# rootfs, and boots a pinned agnos kernel under QEMU. The kernel runs
+# /bin/agnsh as its first program, so this runs at boot with no shell and no
+# keystrokes, prints one line per check to the serial console, and powers the
+# VM off.
+#
+# The network is QEMU's user-mode stack. The host's 127.0.0.1 is 10.0.2.2
+# here, where tests/agnos/peers.py answers on fixed ports; the DHCP-leased
+# resolver 10.0.2.3 forwards to tests/integration/fake_dns.py in `bylabel`
+# mode. Both run inside run.sh's private network namespace, so nothing here
+# touches a real network.
+#
+# Output protocol (run.sh's whole interface — keep the prefixes stable):
+#   TAAR-AGNOS ok <check>
+#   TAAR-AGNOS FAIL <check> got=<n> want=<n>
+#   TAAR-AGNOS DONE pass=<n> fail=<n>
+
+include "src/main.cyr"
+
+var _ag_pass = 0;
+var _ag_fail = 0;
+var _ag_nb[32];
+
+var _AG_HOST  = 0;    # 10.0.2.2  — the host's loopback, through QEMU user-net
+var _AG_DNS   = 0;    # 10.0.2.3  — QEMU user-net's DNS forwarder (DHCP option 6)
+var _AG_FORGE = 0;    # 192.0.2.1 — peers.py's wrong-host forger
+var _AG_UDP_A = 0;    # 10.0.0.1  — fake_dns.py's UDP answer
+var _AG_TCP_A = 0;    # 10.11.12.13 — fake_dns.py's TCP answer
+
+# Port plan; peers.py's docstring is the other half of this table.
+var _AG_UDP_ECHO   = 7101;
+var _AG_UDP_FORGED = 7102;
+var _AG_UDP_FORGER = 7103;
+var _AG_UDP_SLOW   = 7104;
+var _AG_UDP_BURST  = 7105;
+var _AG_TCP_ECHO   = 7201;
+var _AG_TCP_SILENT = 7202;
+var _AG_TCP_REFUSE = 7203;
+var _AG_TCP_HOLE   = 7204;
+var _AG_TCP_SINK   = 7205;
+
+# Write a NUL-terminated string to stdout (the serial console). Returns its length.
+fn _ag_puts(s): i64 {
+    var n = 0;
+    while (load8(s + n) != 0) { n = n + 1; }
+    sys_write(1, s, n);
+    return n;
+}
+
+# Write a signed decimal to stdout. Returns its length.
+fn _ag_putn(v): i64 {
+    var n = fmt_int_buf(v, &_ag_nb);
+    sys_write(1, &_ag_nb, n);
+    return n;
+}
+
+# Count and print one passing check.
+fn _ag_ok(name): i64 {
+    _ag_pass = _ag_pass + 1;
+    _ag_puts("TAAR-AGNOS ok ");
+    _ag_puts(name);
+    _ag_puts("\n");
+    return 1;
+}
+
+# Count and print one failing check with what it saw and expected.
+fn _ag_bad(name, got, want): i64 {
+    _ag_fail = _ag_fail + 1;
+    _ag_puts("TAAR-AGNOS FAIL ");
+    _ag_puts(name);
+    _ag_puts(" got=");
+    _ag_putn(got);
+    _ag_puts(" want=");
+    _ag_putn(want);
+    _ag_puts("\n");
+    return 0;
+}
+
+# Check got == want. Returns 1 on pass.
+fn _ag_eq(got, want, name): i64 {
+    if (got == want) { return _ag_ok(name); }
+    return _ag_bad(name, got, want);
+}
+
+# Check got < 0 (any error). Returns 1 on pass; a failure prints want=-1.
+fn _ag_neg(got, name): i64 {
+    if (got < 0) { return _ag_ok(name); }
+    return _ag_bad(name, got, 0 - 1);
+}
+
+# Check lo <= got < hi. Returns 1 on pass; a failure prints the bound it broke.
+fn _ag_within(got, lo, hi, name): i64 {
+    if (got < lo) { return _ag_bad(name, got, lo); }
+    if (got >= hi) { return _ag_bad(name, got, hi); }
+    return _ag_ok(name);
+}
+
+# --- resolver discovery ---
+
+# The kernel's DHCP lease is the resolver taar picks. Waits up to 5 s for the
+# lease, which the kernel normally holds before /bin/agnsh starts.
+fn ag_lease() {
+    var ns = 0;
+    var i = 0;
+    while (i < 100) {
+        ns = _taar_plat_dns_server();
+        if (ns != 0) { break; }
+        sys_sleep_ms(50);
+        i = i + 1;
+    }
+    _ag_eq(ns, _AG_DNS, "lease: kernel DHCP lease is the user-net DNS forwarder");
+    _ag_eq(_taar_resolv_discover(), _AG_DNS, "lease: discovery prefers the kernel lease");
+    return 0;
+}
+
+# --- UDP ---
+
+# Open / timeout / send / recv / close against an echo peer.
+fn ag_udp_basic() {
+    var fd = taar_udp_open();
+    _ag_within(fd, 0, 8, "udp: open binds a listener slot");
+    _ag_eq(taar_udp_set_timeout_ms(fd, 0 - 1), 0 - 1, "udp: negative timeout refused");
+    _ag_eq(taar_udp_set_timeout_ms(fd, 2000), 0, "udp: timeout accepted");
+    # The kernel reports payload + 42 header bytes; taar must report the payload.
+    _ag_eq(taar_udp_send(fd, _AG_HOST, _AG_UDP_ECHO, "taar-udp-echo", 13), 13,
+      "udp: send returns the payload count, not the frame length");
+    var buf[64];
+    var n = taar_udp_recv(fd, &buf, 64);
+    _ag_eq(n, 13, "udp: echo received");
+    _ag_eq(memeq(&buf, "taar-udp-echo", 13), 1, "udp: echo payload intact");
+    _ag_eq(taar_udp_close(fd), 0, "udp: close");
+    return 0;
+}
+
+# A deadline expiry is _TAAR_ERR_TIMEOUT; a timeout of 0 means no deadline.
+fn ag_udp_deadline() {
+    var buf[64];
+    var fd = taar_udp_open();
+    taar_udp_set_timeout_ms(fd, 100);
+    taar_udp_send(fd, _AG_HOST, _AG_UDP_SLOW, "slow", 4);
+    var t0 = sys_uptime_ms();
+    var n = taar_udp_recv(fd, &buf, 64);
+    var dt = sys_uptime_ms() - t0;
+    _ag_eq(n, _TAAR_ERR_TIMEOUT, "udp: deadline expiry is _TAAR_ERR_TIMEOUT");
+    _ag_within(dt, 90, 380, "udp: 100 ms deadline expires before the 400 ms reply");
+    taar_udp_close(fd);
+
+    fd = taar_udp_open();
+    taar_udp_set_timeout_ms(fd, 0);
+    taar_udp_send(fd, _AG_HOST, _AG_UDP_SLOW, "slow", 4);
+    t0 = sys_uptime_ms();
+    n = taar_udp_recv(fd, &buf, 64);
+    dt = sys_uptime_ms() - t0;
+    _ag_eq(n, 4, "udp: timeout 0 is no deadline (the 400 ms reply is collected)");
+    _ag_within(dt, 300, 5000, "udp: ... after waiting for it");
+    taar_udp_close(fd);
+    return 0;
+}
+
+# Non-vacuity for the filter check below: the two forgeries really do reach
+# this guest, with the source addresses they are meant to carry. Reads the raw
+# kernel call, bypassing taar's filter, which also pins the kernel's addr_out
+# layout (ip at +0, port at +8) that the filter depends on.
+fn ag_udp_forgeries_arrive() {
+    var fd = taar_udp_open();
+    taar_udp_send(fd, _AG_HOST, _AG_UDP_FORGED, "taar-forge-probe", 16);
+    var from[16];
+    var buf[64];
+    var wrong_port = 0;
+    var wrong_host = 0;
+    var real = 0;
+    var deadline = sys_uptime_ms() + 2000;
+    while (sys_uptime_ms() < deadline) {
+        store64(&from, 0);
+        store64(&from + 8, 0);
+        var n = sys_udp_recv(fd, &buf, 64, &from);
+        if (n > 0) {
+            var ip = load64(&from);
+            var port = load64(&from + 8);
+            if (ip == _AG_HOST) {
+                if (port == _AG_UDP_FORGER) { wrong_port = wrong_port + 1; }
+                if (port == _AG_UDP_FORGED) { real = real + 1; }
+            }
+            if (ip == _AG_FORGE) {
+                if (port == _AG_UDP_FORGED) { wrong_host = wrong_host + 1; }
+            }
+        }
+        if (real > 0) { break; }
+        sys_sleep_ms(5);
+    }
+    _ag_eq(wrong_port, 1, "udp: a wrong-port forgery reaches the guest");
+    _ag_eq(wrong_host, 1, "udp: a wrong-host forgery reaches the guest");
+    _ag_eq(real, 1, "udp: the peer's reply reaches the guest (addr_out ip@+0 port@+8)");
+    taar_udp_close(fd);
+    return 0;
+}
+
+# The kernel delivers by destination port alone; taar_udp_recv must drop both
+# forgeries, which land first, and return the peer's own reply.
+fn ag_udp_source_filter() {
+    var fd = taar_udp_open();
+    taar_udp_set_timeout_ms(fd, 2000);
+    taar_udp_send(fd, _AG_HOST, _AG_UDP_FORGED, "taar-filter-check", 17);
+    var buf[64];
+    var n = taar_udp_recv(fd, &buf, 64);
+    _ag_eq(n, 17, "udp: forgeries dropped, the peer's reply returned");
+    _ag_eq(memeq(&buf, "taar-filter-check", 17), 1, "udp: ... carrying the peer's payload");
+    taar_udp_close(fd);
+    return 0;
+}
+
+# A fresh socket has no recorded peer, so until its first send it accepts any
+# sender — taar_udp_open must clear the previous socket's peer, or a socket
+# opened after a resolve would filter on the resolver's address. The datagram
+# goes to this socket's own port over the kernel's 127/8 loopback, sent raw so
+# that no peer is recorded on the way.
+fn ag_udp_fresh_peer() {
+    var buf[64];
+    var a = taar_udp_open();
+    taar_udp_set_timeout_ms(a, 2000);
+    taar_udp_send(a, _AG_HOST, _AG_UDP_ECHO, "first", 5);
+    taar_udp_recv(a, &buf, 64);
+    taar_udp_close(a);
+    var b = taar_udp_open();
+    taar_udp_set_timeout_ms(b, 1000);
+    var port = _taar_ag_src_port;
+    sys_udp_send(ipv4_parse("127.0.0.1"), (port << 16) | port, "self", 4);
+    _ag_eq(taar_udp_recv(b, &buf, 64), 4, "udp: a fresh socket accepts any sender until its first send");
+    taar_udp_close(b);
+    return 0;
+}
+
+# Kernel canary, not a taar guard: an AGNOS UDP listener holds ONE unread
+# datagram, and a later arrival overwrites it (net_handle_udp). taar's
+# socket.cyr documents what that costs — a datagram landing after the real
+# reply but before taar polls evicts it — so if a kernel bump ever queues
+# datagrams, this goes red and that note gets rewritten.
+fn ag_udp_one_slot() {
+    var fd = taar_udp_open();
+    taar_udp_send(fd, _AG_HOST, _AG_UDP_BURST, "burst", 5);
+    sys_sleep_ms(200);                      # both datagrams land before we look
+    var from[16];
+    var buf[64];
+    var first = sys_udp_recv(fd, &buf, 64, &from);
+    var second = sys_udp_recv(fd, &buf, 64, &from);
+    _ag_eq(first, 10, "kernel: a UDP listener keeps only the later of two datagrams");
+    _ag_eq(second, 0, "kernel: ... and nothing else is queued");
+    taar_udp_close(fd);
+    return 0;
+}
+
+# --- TCP ---
+
+# Connect / send / recv to EOF / close against an echo peer that closes.
+fn ag_tcp_basic() {
+    var fd = taar_tcp_open();
+    _ag_eq(taar_tcp_set_timeout_ms(fd, 0 - 1), 0 - 1, "tcp: negative timeout refused");
+    _ag_eq(taar_tcp_set_timeout_ms(fd, 3000), 0, "tcp: timeout accepted");
+    _ag_eq(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_ECHO), 0, "tcp: connect to a listening peer");
+    _ag_eq(taar_tcp_send(fd, "taar-tcp-echo", 0), 0, "tcp: an empty send is 0, not a timeout");
+    _ag_eq(taar_tcp_send(fd, "taar-tcp-echo", 13), 13, "tcp: send");
+    var buf[64];
+    var got = 0;
+    var n = 0;
+    var reads = 0;
+    while (reads < 8) {
+        n = taar_tcp_recv(fd, &buf + got, 64 - got);
+        if (n <= 0) { break; }
+        got = got + n;
+        reads = reads + 1;
+    }
+    _ag_eq(got, 13, "tcp: echo received");
+    _ag_eq(memeq(&buf, "taar-tcp-echo", 13), 1, "tcp: echo payload intact");
+    _ag_eq(n, 0, "tcp: the peer's close reads as 0");
+    _ag_eq(taar_sock_close(fd), 0, "tcp: close");
+    _ag_eq(taar_sock_close(fd), 0, "tcp: a second close is a no-op");
+    return 0;
+}
+
+# With no connection (never connected, or closed), send and recv are errors.
+# A recv that answered 0 here would tell a caller reading to EOF that a
+# connection it never had closed cleanly.
+fn ag_tcp_no_conn() {
+    var buf[16];
+    var fd = taar_tcp_open();
+    _ag_neg(taar_tcp_recv(fd, &buf, 16), "tcp: recv before connect is an error, not EOF");
+    _ag_neg(taar_tcp_send(fd, "x", 1), "tcp: send before connect is an error");
+    taar_tcp_set_timeout_ms(fd, 3000);
+    taar_tcp_connect(fd, _AG_HOST, _AG_TCP_ECHO);
+    taar_sock_close(fd);
+    _ag_neg(taar_tcp_recv(fd, &buf, 16), "tcp: recv after close is an error, not EOF");
+    _ag_neg(taar_tcp_send(fd, "x", 1), "tcp: send after close is an error");
+    return 0;
+}
+
+# A connected peer that never sends: the receive deadline must fire, and it
+# must say timeout rather than closed.
+fn ag_tcp_deadline() {
+    var fd = taar_tcp_open();
+    taar_tcp_set_timeout_ms(fd, 300);
+    _ag_eq(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_SILENT), 0, "tcp: connect to a silent peer");
+    var buf[16];
+    var t0 = sys_uptime_ms();
+    var n = taar_tcp_recv(fd, &buf, 16);
+    var dt = sys_uptime_ms() - t0;
+    _ag_eq(n, _TAAR_ERR_TIMEOUT, "tcp: a stalled peer is _TAAR_ERR_TIMEOUT, not 0");
+    _ag_within(dt, 280, 2000, "tcp: 300 ms receive deadline honoured");
+    taar_sock_close(fd);
+    return 0;
+}
+
+# A peer that stops reading: once the window closes a send must end in
+# _TAAR_ERR_TIMEOUT within the socket's deadline, as SO_SNDTIMEO makes Linux
+# do. sock_send#48 alone answers 0 after its own ~8 s window, and a caller
+# that retries 0 as "no progress yet" (whirl's send loop does, up to 1000
+# times) then waits for hours.
+fn ag_tcp_send_deadline() {
+    var big = alloc(65536);
+    var fd = taar_tcp_open();
+    taar_tcp_set_timeout_ms(fd, 500);
+    _ag_eq(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_SINK), 0, "tcp: connect to a peer that never reads");
+    var total = 0;
+    var r = 0;
+    var dt = 0;
+    while (total < 67108864) {
+        var t0 = sys_uptime_ms();
+        r = taar_tcp_send(fd, big, 65536);
+        dt = sys_uptime_ms() - t0;
+        if (r <= 0) { break; }
+        total = total + r;
+    }
+    _ag_within(total, 1, 67108864, "tcp: sends progress until the peer's window closes");
+    _ag_eq(r, _TAAR_ERR_TIMEOUT, "tcp: a send that cannot progress is _TAAR_ERR_TIMEOUT");
+    _ag_within(dt, 0, 2000, "tcp: ... within the 500 ms send deadline");
+    taar_sock_close(fd);
+    return 0;
+}
+
+# Connects that cannot complete fail, and are bounded by the kernel's own
+# connect window (sock_connect#47 carries ~8 s; taar does not shorten it).
+fn ag_tcp_connect_fail() {
+    var fd = taar_tcp_open();
+    var t0 = sys_uptime_ms();
+    _ag_neg(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_REFUSE), "tcp: connect to a closed port fails");
+    _ag_within(sys_uptime_ms() - t0, 0, 15000, "tcp: ... within the kernel connect window");
+    taar_sock_close(fd);
+
+    fd = taar_tcp_open();
+    t0 = sys_uptime_ms();
+    _ag_neg(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_HOLE), "tcp: connect whose SYNs are dropped fails");
+    _ag_within(sys_uptime_ms() - t0, 0, 15000, "tcp: ... within the kernel connect window");
+    taar_sock_close(fd);
+    return 0;
+}
+
+# --- resolver, end to end ---
+
+# taar_resolve_ipv4 through the kernel lease, against fake_dns.py `bylabel`:
+# each name's first label picks the server's behaviour.
+fn ag_dns() {
+    _ag_eq(taar_resolve_ipv4("full.taar.test"), _AG_UDP_A, "dns: TC=0 uses the UDP answer");
+    _ag_eq(taar_resolve_ipv4("tc.taar.test"), _AG_TCP_A, "dns: TC=1 retries over TCP");
+    _ag_eq(taar_resolve_ipv4("tc_answer.taar.test"), _AG_UDP_A,
+      "dns: TC=1 + TCP closed unanswered falls back to the UDP answer");
+    _ag_eq(taar_resolve_ipv4("tc_huge.taar.test"), _AG_UDP_A,
+      "dns: TCP frame larger than the client buffer refused");
+    _ag_eq(taar_resolve_ipv4("tc_runt.taar.test"), _AG_UDP_A,
+      "dns: TCP frame shorter than a header refused");
+    _ag_eq(taar_resolve_ipv4("spoof.taar.test"), _AG_UDP_A,
+      "dns: a reply forged from the resolver's host, wrong port, ignored");
+    _ag_eq(_taar_ag_conn, 0 - 1, "dns: the TC retries leave no TCP connection open");
+    return 0;
+}
+
+# Runs every group, prints the DONE line, and powers the VM off. Returns the
+# failure count (reached only if the power-off call fails).
+fn main() {
+    alloc_init();
+    _AG_HOST = ipv4_parse("10.0.2.2");
+    _AG_DNS = ipv4_parse("10.0.2.3");
+    _AG_FORGE = ipv4_parse("192.0.2.1");
+    _AG_UDP_A = ipv4_parse("10.0.0.1");
+    _AG_TCP_A = ipv4_parse("10.11.12.13");
+    _ag_puts("TAAR-AGNOS begin\n");
+
+    ag_lease();
+    ag_udp_basic();
+    ag_udp_deadline();
+    ag_udp_forgeries_arrive();
+    ag_udp_source_filter();
+    ag_udp_fresh_peer();
+    ag_udp_one_slot();
+    ag_tcp_basic();
+    ag_tcp_no_conn();
+    ag_tcp_deadline();
+    ag_tcp_send_deadline();
+    ag_tcp_connect_fail();
+    ag_dns();
+
+    _ag_puts("TAAR-AGNOS DONE pass=");
+    _ag_putn(_ag_pass);
+    _ag_puts(" fail=");
+    _ag_putn(_ag_fail);
+    _ag_puts("\n");
+    sys_reboot(PWR_MAGIC1, PWR_MAGIC2, PWR_OFF, 0);
+    return _ag_fail;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

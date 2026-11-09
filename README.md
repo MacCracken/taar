@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.6.2.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.7.0.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -48,7 +48,7 @@ kernel struct fields and ready as the packed-addr argument to the AGNOS
 |--------|-------|----------------|
 | Linux x86_64 | CI | yes — unit + integration |
 | Linux aarch64 | CI | yes — unit + smoke, under `qemu-user` |
-| AGNOS | CI | **no** — compiled only; see the roadmap |
+| AGNOS x86_64 | CI | yes — booted under QEMU, socket + resolver checks |
 
 ## Consuming taar
 
@@ -59,7 +59,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.6.2"
+tag = "0.7.0"
 modules = ["dist/taar.cyr"]
 ```
 
@@ -98,11 +98,23 @@ cyrius build programs/tcp-resolve-smoke.cyr build/taar-tcp-resolve    # DNS over
 The DNS truncation path can't be unit-tested — no live resolver truncates on
 demand — so `tests/integration/` stands up a fake resolver that answers
 differently over UDP and TCP, inside `unshare -rn` so it can hold port 53
-without root. It also simulates a TCP/53 that drops SYNs. The script builds
-its own binary from the checkout, and runs in CI:
+without root. It also simulates a TCP/53 that drops SYNs and a reply forged
+from the wrong port. The script builds its own binary from the checkout, and
+runs in CI:
 
 ```sh
 tests/integration/tc_fallback.sh
+```
+
+The AGNOS backend is executed on the AGNOS kernel itself. The harness boots a
+pinned, checksum-verified agnos release under QEMU with
+`tests/agnos/selftest.cyr` as its first program, against host-side peers and
+the same fake resolver, all inside a private namespace. It needs
+`qemu-system-x86_64`, OVMF, mtools, parted, sgdisk and `mkfs.ext2`, and runs in
+CI:
+
+```sh
+tests/agnos/run.sh
 ```
 
 ## Documentation
