@@ -42,6 +42,7 @@ var _AG_TCP_SILENT = 7202;
 var _AG_TCP_REFUSE = 7203;
 var _AG_TCP_HOLE   = 7204;
 var _AG_TCP_SINK   = 7205;
+var _AG_TCP_SLOW   = 7206;
 
 # Write a NUL-terminated string to stdout (the serial console). Returns its length.
 fn _ag_puts(s): i64 {
@@ -226,8 +227,11 @@ fn ag_udp_fresh_peer() {
     taar_udp_recv(a, &buf, 64);
     taar_udp_close(a);
     var b = taar_udp_open();
+    # Setup, not the property: the check below exercises taar_udp_open's peer
+    # reset only if the kernel hands the freed listener id back out.
+    _ag_eq(b, a, "udp: (setup) the freed listener id is reused");
     taar_udp_set_timeout_ms(b, 1000);
-    var port = _taar_ag_src_port;
+    var port = load64(&_taar_ag_udp_port + b * 8);
     sys_udp_send(ipv4_parse("127.0.0.1"), (port << 16) | port, "self", 4);
     _ag_eq(taar_udp_recv(b, &buf, 64), 4, "udp: a fresh socket accepts any sender until its first send");
     taar_udp_close(b);
@@ -262,6 +266,9 @@ fn ag_tcp_basic() {
     _ag_eq(taar_tcp_set_timeout_ms(fd, 3000), 0, "tcp: timeout accepted");
     _ag_eq(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_ECHO), 0, "tcp: connect to a listening peer");
     _ag_eq(taar_tcp_send(fd, "taar-tcp-echo", 0), 0, "tcp: an empty send is 0, not a timeout");
+    var t0 = sys_uptime_ms();
+    _ag_eq(taar_tcp_recv(fd, "", 0), 0, "tcp: an empty recv is 0, as read(2) answers");
+    _ag_within(sys_uptime_ms() - t0, 0, 1000, "tcp: ... at once, not after the deadline");
     _ag_eq(taar_tcp_send(fd, "taar-tcp-echo", 13), 13, "tcp: send");
     var buf[64];
     var got = 0;
@@ -277,7 +284,7 @@ fn ag_tcp_basic() {
     _ag_eq(memeq(&buf, "taar-tcp-echo", 13), 1, "tcp: echo payload intact");
     _ag_eq(n, 0, "tcp: the peer's close reads as 0");
     _ag_eq(taar_sock_close(fd), 0, "tcp: close");
-    _ag_eq(taar_sock_close(fd), 0, "tcp: a second close is a no-op");
+    _ag_neg(taar_sock_close(fd), "tcp: a second close is an error, as on Linux (EBADF)");
     return 0;
 }
 
@@ -357,6 +364,127 @@ fn ag_tcp_connect_fail() {
     return 0;
 }
 
+# --- per-socket state ---
+
+# fds that taar did not hand out are refused, by every call. The huge and
+# negative values would index far outside taar's per-socket tables: without the
+# range checks the read faults and the selftest dies, which run.sh reports.
+fn ag_fd_guards() {
+    var buf[16];
+    var huge = 0x10000000;
+    var neg = 0 - 0x10000000;
+    _ag_neg(taar_tcp_set_timeout_ms(huge, 100), "fd: tcp set_timeout refuses an out-of-range fd");
+    _ag_neg(taar_tcp_connect(huge, _AG_HOST, _AG_TCP_ECHO), "fd: tcp connect refuses an out-of-range fd");
+    _ag_neg(taar_tcp_send(huge, "x", 1), "fd: tcp send refuses an out-of-range fd");
+    _ag_neg(taar_tcp_recv(neg, &buf, 16), "fd: tcp recv refuses a negative fd");
+    _ag_neg(taar_sock_close(neg), "fd: tcp close refuses a negative fd");
+    _ag_neg(taar_udp_set_timeout_ms(huge, 100), "fd: udp set_timeout refuses an out-of-range fd");
+    _ag_neg(taar_udp_send(neg, _AG_HOST, _AG_UDP_ECHO, "x", 1), "fd: udp send refuses a negative fd");
+    _ag_neg(taar_udp_recv(huge, &buf, 16), "fd: udp recv refuses an out-of-range fd");
+    # A listener bound outside taar is not a taar socket: taar must neither
+    # send from it nor unbind it.
+    var raw = sys_udp_bind(40000);
+    _ag_neg(taar_udp_send(raw, _AG_HOST, _AG_UDP_ECHO, "x", 1), "fd: udp send refuses a listener taar did not open");
+    _ag_neg(taar_udp_close(raw), "fd: udp close refuses a listener taar did not open");
+    _ag_eq(sys_udp_unbind(raw), 0, "fd: ... and leaves it bound");
+    # A UDP listener id is not a TCP fd.
+    var u = taar_udp_open();
+    _ag_neg(taar_sock_close(u), "fd: tcp close refuses a udp fd");
+    _ag_eq(taar_udp_close(u), 0, "fd: ... which still closes as udp");
+    return 0;
+}
+
+# Each TCP socket is its own: distinct fds, a bounded table, and no second
+# connect over a live one (it would orphan the first conn's kernel slot).
+fn ag_tcp_table() {
+    var fds[128];
+    var n = 0;
+    while (n < 16) {
+        var f = taar_tcp_open();
+        if (f < 0) { break; }
+        store64(&fds + n * 8, f);
+        n = n + 1;
+    }
+    _ag_eq(n, 8, "tcp: eight sockets open, the ninth is refused");
+    _ag_eq(load64(&fds) != load64(&fds + 8), 1, "tcp: each open returns its own fd");
+    var i = 0;
+    while (i < n) { taar_sock_close(load64(&fds + i * 8)); i = i + 1; }
+    var again = taar_tcp_open();
+    _ag_within(again, 0, 0x7FFFFFFF, "tcp: closing frees the slots");
+    taar_sock_close(again);
+
+    var fd = taar_tcp_open();
+    taar_tcp_set_timeout_ms(fd, 3000);
+    taar_tcp_connect(fd, _AG_HOST, _AG_TCP_ECHO);
+    _ag_neg(taar_tcp_connect(fd, _AG_HOST, _AG_TCP_ECHO), "tcp: connecting a connected socket is refused");
+    _ag_eq(taar_tcp_send(fd, "kept", 4), 4, "tcp: ... and the first connection is kept");
+    var b[16];
+    _ag_eq(taar_tcp_recv(fd, &b, 16), 4, "tcp: ... and still answers");
+    taar_sock_close(fd);
+    return 0;
+}
+
+# A new socket starts from defaults, not from what the last socket in its slot
+# was set to. The previous socket's 50 ms deadline would expire before the
+# peer's 400 ms reply; the default does not.
+fn ag_fresh_defaults() {
+    var buf[16];
+    var a = taar_tcp_open();
+    taar_tcp_set_timeout_ms(a, 50);
+    taar_sock_close(a);
+    var b = taar_tcp_open();
+    taar_tcp_connect(b, _AG_HOST, _AG_TCP_SLOW);
+    taar_tcp_send(b, "slow", 4);
+    _ag_eq(taar_tcp_recv(b, &buf, 16), 4, "tcp: a new socket does not inherit a closed one's timeout");
+    taar_sock_close(b);
+
+    var u = taar_udp_open();
+    taar_udp_set_timeout_ms(u, 50);
+    taar_udp_close(u);
+    var v = taar_udp_open();
+    taar_udp_send(v, _AG_HOST, _AG_UDP_SLOW, "slow", 4);
+    _ag_eq(taar_udp_recv(v, &buf, 16), 4, "udp: a new socket does not inherit a closed one's timeout");
+    taar_udp_close(v);
+    return 0;
+}
+
+# A resolve in the middle of a consumer's sockets leaves them alone: their
+# connection, timeout, recorded peer and source port all survive it. Through
+# 0.7.0 all four were module globals the resolver overwrote.
+fn ag_isolation() {
+    var buf[32];
+    # TCP connection across a resolve whose TC retry opens and closes its own.
+    var t = taar_tcp_open();
+    taar_tcp_set_timeout_ms(t, 3000);
+    taar_tcp_connect(t, _AG_HOST, _AG_TCP_ECHO);
+    _ag_eq(taar_resolve_ipv4("tc.taar.test"), _AG_TCP_A, "iso: a TC resolve with a consumer conn open");
+    _ag_eq(taar_tcp_send(t, "iso-tcp", 7), 7, "iso: the consumer's conn still sends");
+    _ag_eq(taar_tcp_recv(t, &buf, 32), 7, "iso: ... and still receives");
+    taar_sock_close(t);
+
+    # TCP timeout across a resolve that sets its own.
+    var s = taar_tcp_open();
+    taar_tcp_set_timeout_ms(s, 300);
+    taar_tcp_connect(s, _AG_HOST, _AG_TCP_SILENT);
+    taar_resolve_ipv4("full.taar.test");
+    var t0 = sys_uptime_ms();
+    _ag_eq(taar_tcp_recv(s, &buf, 32), _TAAR_ERR_TIMEOUT, "iso: the consumer's recv still times out");
+    _ag_within(sys_uptime_ms() - t0, 250, 2000, "iso: ... at its own 300 ms, not the resolver's 5 s");
+    taar_sock_close(s);
+
+    # UDP: a reply that lands while a resolve runs is still the consumer's.
+    var u = taar_udp_open();
+    taar_udp_set_timeout_ms(u, 2000);
+    taar_udp_send(u, _AG_HOST, _AG_UDP_ECHO, "iso-udp-1", 9);
+    taar_resolve_ipv4("full.taar.test");
+    _ag_eq(taar_udp_recv(u, &buf, 32), 9, "iso: a udp reply that arrived mid-resolve is accepted (own peer)");
+    # ... and its next exchange still goes out from its own port.
+    taar_udp_send(u, _AG_HOST, _AG_UDP_ECHO, "iso-udp-22", 10);
+    _ag_eq(taar_udp_recv(u, &buf, 32), 10, "iso: a udp send after a resolve uses its own port");
+    taar_udp_close(u);
+    return 0;
+}
+
 # --- resolver, end to end ---
 
 # taar_resolve_ipv4 through the kernel lease, against fake_dns.py `bylabel`:
@@ -372,7 +500,13 @@ fn ag_dns() {
       "dns: TCP frame shorter than a header refused");
     _ag_eq(taar_resolve_ipv4("spoof.taar.test"), _AG_UDP_A,
       "dns: a reply forged from the resolver's host, wrong port, ignored");
-    _ag_eq(_taar_ag_conn, 0 - 1, "dns: the TC retries leave no TCP connection open");
+    var open = 0;
+    var i = 0;
+    while (i < _TAAR_AG_SLOTS) {
+        open = open + load64(&_taar_ag_tcp_used + i * 8);
+        i = i + 1;
+    }
+    _ag_eq(open, 0, "dns: the TC retries leave no TCP socket open");
     return 0;
 }
 
@@ -399,6 +533,10 @@ fn main() {
     ag_tcp_deadline();
     ag_tcp_send_deadline();
     ag_tcp_connect_fail();
+    ag_fd_guards();
+    ag_tcp_table();
+    ag_fresh_defaults();
+    ag_isolation();
     ag_dns();
 
     _ag_puts("TAAR-AGNOS DONE pass=");

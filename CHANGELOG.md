@@ -4,6 +4,117 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-09
+
+Per-socket state on AGNOS, the first 0.7.x parity item. The AGNOS arm kept
+one timeout, one TCP connection and one UDP source port and peer for the
+whole process. So a `taar_resolve_ipv4` call made while a consumer's sockets
+were open could break them. Each disturbance below was reproduced in the
+harness against 0.7.0 and is gone in 0.7.1.
+
+### Fixed (AGNOS)
+
+- **A resolve no longer disturbs the caller's sockets.** Measured against
+  0.7.0:
+  - **TCP connection:** a TC resolve's TCP retry dropped the caller's live
+    connection, so its next send failed with -1, and leaked that
+    connection's kernel slot;
+  - **TCP timeout:** the resolver's 5 s timeout replaced the caller's, so a
+    300 ms receive waited 5004 ms;
+  - **UDP peer:** a UDP reply that landed while a resolve ran was dropped,
+    because the source filter compared it with the resolver's peer;
+  - **UDP source port:** the caller's next UDP send left from the resolver's
+    freed port, so its reply never came back.
+
+  Each socket now has its own table slot holding its timeout, connection,
+  source port and recorded peer.
+- **fds are validated.** The AGNOS calls used to ignore `fd` entirely. Every
+  call now checks it against the table, and returns -1 for an fd that taar
+  did not hand out, has closed, or that is out of range. taar no longer sends
+  from, or unbinds, a listener bound outside it.
+- **Connecting a connected socket is refused** with -1 (Linux:
+  -EISCONN). Before, the second connect orphaned the first connection's
+  kernel slot.
+- **An empty `taar_tcp_recv` returns 0 at once**, as read(2) does. The
+  kernel answers 0 ("nothing yet") to a zero-length `sock_recv#49`, so the
+  poll loop waited out the whole deadline (3013 ms measured with a 3 s
+  deadline), or forever with none. No consumer passes 0 today; this is the
+  receive twin of 0.7.0's empty-send guard. Found by reading the kernel's
+  `sock_recv` alongside this change.
+
+### Changed (AGNOS, visible to callers)
+
+- **TCP fds:** `taar_tcp_open` returns a distinct fd per socket, 64..71,
+  where it used to return 0 for every socket. It returns -1 when all eight
+  are open, the size of the kernel's connection table. whirl only passes the
+  fd back to taar, including through its TLS layer, so the value does not
+  matter to it.
+- **Double close:** `taar_sock_close` on an already-closed fd returns -1
+  (was 0), as Linux's close(2) returns -EBADF.
+- **Defaults:** a new socket starts with the default 10 s deadline, never
+  the one its slot's previous socket had.
+
+### Decided
+
+- **The stdlib's AGNOS socket adapter was evaluated and not adopted.** Since
+  cyrius 6.6.17, the `syscalls` leaf taar already carries turns `sys_socket`,
+  `sys_connect`, `sys_read` and `sys_write` into tagged fds with per-socket
+  deadlines. It was not used, for three reasons:
+  - its deadlines can only be set through `net.cyr`'s
+    `sock_set_*_timeout`, and taar may not depend on `net` (whirl does not
+    carry it); AGNOS `sys_setsockopt` declines everything;
+  - its write re-arms the deadline whenever bytes move, which would change
+    taar's per-call send deadline a second time in two releases;
+  - it has no UDP.
+
+  taar keeps its own tables.
+
+### Documentation
+
+- **Correction to 0.7.0.** 0.7.0 said `sock_connect#47` had no deadline form
+  and that telling a clean EOF from a reset needed an agnos kernel change.
+  Both were wrong: the kernel already has both.
+  - **Connect deadline:** agnos 1.57.18 added `SC_TIMED` to `sock_connect#47`.
+  - **Reset vs EOF:** agnos 1.57.17's `epoll_wait#21` reports `EPOLLERR` for a
+    connection that died and `EPOLLRDHUP` for a FIN.
+
+  What taar lacks is the cyrius stdlib wrappers for both. They are filed as
+  cyrius issues 2026-11-04 and 2026-11-08, and both are open. The roadmap now
+  points there.
+- **One real kernel ask remains, now filed with agnos:** the one-datagram UDP
+  listener, as agnos issue
+  `2026-11-09-a-udp-listener-keeps-one-datagram-so-a-stray-one-evicts-the-reply.md`
+  (written to agnos's `docs/development/issues/`, its file-based tracker). It
+  carries the harness's measurement and asks for a small per-listener queue
+  that drops new arrivals when full, with no ABI change.
+
+### Tests
+
+- **AGNOS harness: 53 → 84 checks.** New groups:
+  - fd guards: out-of-range fds, which fault without the range checks, a
+    foreign listener, and a UDP fd passed to a TCP call;
+  - the TCP table: eight sockets open, the ninth is refused, each fd is
+    distinct, and a second connect is refused;
+  - fresh-socket defaults;
+  - isolation: a consumer's TCP and UDP sockets survive a resolve.
+
+  `peers.py` gains a slow TCP echo on port 7206.
+- **Mutation-checked through the harness.** Each new guard was removed in
+  turn: the range and open checks on both tables, every field open
+  initialises, close marking a slot free, the connect-on-connected refusal,
+  the table bound and the empty-recv guard. 16 of 17 mutations went red; the
+  one green is explained below. The 0.7.0
+  AGNOS set was re-run against the rewritten arm: 9 of 10 red, and the green
+  one is the send-side no-connection check already documented as redundant.
+  - Out-of-range fds make the selftest fault, which the harness reports as
+    "did not finish".
+  - Widening the TCP table's scan bound from 8 to 16 stays green, because
+    the slots past the table read the connection table's -1 entries as
+    "in use". Removing the bound outright is red: 16 sockets open.
+- **`TAAR_AGNOS_TCG=1`** forces the harness onto TCG, which is what a CI
+  runner without `/dev/kvm` gets. All 84 checks pass under it, in 23 s
+  against 15 s with KVM.
+
 ## [0.7.0] - 2026-11-09
 
 The AGNOS backend runs. Until now `src/socket.cyr`'s `#ifdef

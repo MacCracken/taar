@@ -18,36 +18,37 @@ Hardening of what already ships is not growth and does not wait on a consumer.
 
 Since 0.7.0 the AGNOS arm executes: `tests/agnos/run.sh` boots a pinned agnos
 kernel under QEMU and runs `tests/agnos/selftest.cyr` against it, in CI. What
-remains is where the AGNOS arm still differs from the Linux one.
+remains is where the AGNOS arm still differs from the Linux one. Each item now
+waits on an upstream change: two on cyrius stdlib wrappers for ABI agnos
+already ships, one on agnos itself.
 
-- **Per-socket AGNOS state.** Timeout, TCP conn and UDP peer / source port are
-  module globals, so a resolve disturbs a consumer's socket: the TC retry's
-  `taar_tcp_open` drops a live conn without closing it (a leaked kernel slot,
-  and the consumer's next recv now reads -1), `taar_resolve_ipv4` overwrites
-  the consumer's timeout, and `_taar_ag_src_port` keeps the resolver's freed
-  port. Index state by the fd taar returns. Evaluate first whether the TCP half
-  can sit on the stdlib's own AGNOS socket adapter: since cyrius 6.6.17 the
-  `syscalls` leaf taar already carries turns `sys_socket` / `sys_connect` /
-  `sys_read` / `sys_write` into tagged fds with per-socket deadlines over
-  `sock_*` and `sock_send_dl`#109. Its UDP verbs (`sys_sendto`, `sys_recvfrom`)
-  decline, so UDP state stays taar's either way. *Ready* — the harness can now
-  show the disturbance before and after.
 - **AGNOS EOF vs reset.** `sock_recv#49` answers -1 for a clean EOF *and* for
   a reset / dead conn, so `taar_tcp_recv` reports both as 0 ("peer closed")
   where Linux returns -ECONNRESET; a consumer reading to EOF can take a
-  mid-body reset for a complete response. *Waits on:* the agnos kernel
-  distinguishing the two (to file upstream), then a one-line map in taar.
-- **AGNOS connect deadline.** `sock_connect#47` has no deadline form, so an
-  AGNOS connect is bounded by the kernel's ~8 s whatever
-  `taar_tcp_set_timeout_ms` asked for (Linux honours it). The harness pins the
-  ~8 s bound. *Waits on:* a kernel connect-with-deadline (to file upstream).
+  mid-body reset for a complete response. The kernel already tells them apart
+  elsewhere: since agnos 1.57.17, `epoll_wait#21` on `EP_TCP | conn` reports
+  `EPOLLIN | EPOLLERR | EPOLLHUP` for a conn that died (RST or retransmit
+  exhaustion) and `EPOLLRDHUP` for the peer's FIN. So when #49 says -1, taar
+  can ask the conn's readiness and return `_TAAR_ERR_RESET` (or -ECONNRESET)
+  for the first. Keep one epoll instance per process: agnos never frees an
+  instance's watch list, so one per call leaks kernel heap. *Waits on:* cyrius's
+  agnos peer for the `epoll_ctl` op-3 target and the `EP_TCP` / `EPOLL*`
+  constants — cyrius issue `2026-11-04-agnos-epoll-timeout-epollout-tcp-ids-peer.md`,
+  open. (Issuing the 4-argument calls with taar's own constants would work, but
+  CLAUDE.md's rule is the stdlib wrapper.)
+- **AGNOS connect deadline.** taar's AGNOS connect is bounded by the kernel's
+  ~8 s whatever `taar_tcp_set_timeout_ms` asked for (Linux honours it), and the
+  harness pins that ~8 s. agnos 1.57.18 added the deadline: `SC_TIMED` (bit 32
+  of `sock_connect#47`'s src_port) makes a4 the timeout in ms, measured once
+  from entry. *Waits on:* cyrius's `sys_sock_connect` peer for it — cyrius issue
+  `2026-11-08-agnos-fd-wait-ready-and-sock-connect-deadline.md`, open.
 - **AGNOS UDP keeps one datagram.** A listener holds one unread datagram and
   the next arrival overwrites it (`net_handle_udp`), so a stray datagram
   landing after the real DNS reply, before taar's next 5 ms poll, evicts the
   reply and the resolve times out. Never a wrong answer — the source filter
   still applies — but a cheap way to fail a resolve. The harness has a canary
-  that goes red when this changes. *Waits on:* the kernel queueing datagrams
-  (to file upstream).
+  that goes red when this changes. *Waits on:* the kernel queueing datagrams —
+  filed as agnos `docs/development/issues/2026-11-09-a-udp-listener-keeps-one-datagram-so-a-stray-one-evicts-the-reply.md`.
 
 ## 0.8.x — stub-resolver completeness
 
@@ -125,11 +126,12 @@ Grown only when the named trigger fires.
 
 Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
 
-- **Bump to 0.7.0** — matters to `whirl`, whose AGNOS transport is live:
+- **Bump to 0.7.1** — matters to `whirl`, whose AGNOS transport is live:
   its sends become bounded by the 10 s deadline it already sets (they were
-  not — its 1000-try loop on a 0 return could wait hours), and a recv with no
-  connection is now an error rather than a clean close. `yo` and `dig` use
-  only `ipv4`, which is unchanged.
+  not — its 1000-try loop on a 0 return could wait hours), a recv with no
+  connection is an error rather than a clean close (0.7.0), and its resolve no
+  longer shares socket state with its HTTP connection (0.7.1). `yo` and `dig`
+  use only `ipv4`, which is unchanged.
 - **`dig` onto taar's `socket` and `dns`.** The `socket` fold trigger fired at
   dig 0.3.7, when dig wrote its own connect-then-write UDP transport — the same
   RFC 5452 reasoning as `taar_udp_send`, rediscovered. The fold runs the other

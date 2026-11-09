@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.7.0.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.7.1.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -59,7 +59,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.7.0"
+tag = "0.7.1"
 modules = ["dist/taar.cyr"]
 ```
 

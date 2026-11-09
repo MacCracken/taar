@@ -31,6 +31,8 @@
 # the result then says nothing about the pinned environment):
 #   TAAR_AGNOS_KERNEL=<path>   TAAR_GNOBOOT_EFI=<path>
 #   TAAR_AGNOS_TIMEOUT=<s>     wall-clock budget for the boot (default 180)
+#   TAAR_AGNOS_TCG=1           force TCG even with KVM present — what a CI
+#                              runner without /dev/kvm gets
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -123,9 +125,9 @@ mkfs.ext2 -F -q -L TAAR-AGNOS -b 4096 -m 0 -O "^resize_inode,^dir_index,^metadat
 cp "$OVMF_VARS" "$WORK/vars.fd" && chmod +w "$WORK/vars.fd"
 
 ACCEL="-enable-kvm -cpu host"
-if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ] || [ -n "${TAAR_AGNOS_TCG:-}" ]; then
     ACCEL="-cpu max"            # TCG: slower, same result. `-cpu max` for SMEP/SMAP.
-    echo "  accel  : TCG (no usable /dev/kvm)"
+    echo "  accel  : TCG (no usable /dev/kvm, or TAAR_AGNOS_TCG set)"
 fi
 printf 'nameserver 127.0.0.53\n' > "$WORK/resolv.conf"
 SER="$WORK/serial.log"

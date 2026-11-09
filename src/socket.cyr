@@ -270,8 +270,8 @@ fn _taar_plat_dns_server(): i64 { return 0; }
 #
 # Model bridges the POSIX surface needs on AGNOS:
 #   1. No socket()+connect() split: sock_connect(dst_ip,dst_port,src_port)→conn_id
-#      combines them. taar_tcp_open just resets the conn slot; taar_tcp_connect
-#      does the real work and stashes the conn_id (single active conn).
+#      combines them. taar_tcp_open reserves a slot in taar's own table;
+#      taar_tcp_connect does the real work and records the conn_id there.
 #   2. sock_recv#49 / udp_recv#53 are NON-BLOCKING (>0 data / 0 WOULD_BLOCK /
 #      -1 EOF for TCP; >0 / 0 none / -1 for UDP) with no SO_RCVTIMEO analog —
 #      so the recv path polls against an uptime_ms deadline. taar_tcp_recv maps
@@ -290,27 +290,50 @@ fn _taar_plat_dns_server(): i64 { return 0; }
 #      still drops the newcomer, and the wait then times out. A forger can
 #      therefore make a resolve fail, never make it accept a forgery. The
 #      5 ms poll keeps that window narrow. tests/agnos/selftest.cyr carries a
-#      canary that goes red if a kernel bump starts queueing.
+#      canary that goes red if a kernel bump starts queueing (asked of agnos:
+#      its issue 2026-11-09-a-udp-listener-keeps-one-datagram-…).
 #   6. Send deadlines go through sock_send_dl#109 (agnos >= 1.57.13), probed
 #      once; an older kernel's sock_send#48 cannot be bounded below its own
-#      ~8 s progress window. sock_connect#47 has no deadline form at all, so
-#      a connect is bounded by the kernel's ~8 s, whatever the caller asked.
+#      ~8 s progress window. A connect is bounded by the kernel's ~8 s,
+#      whatever the caller asked: agnos 1.57.18's SC_TIMED deadline for
+#      sock_connect#47 has no cyrius wrapper yet (roadmap).
 #
 # Executed by tests/agnos/run.sh, which boots a pinned agnos kernel under QEMU
 # and runs tests/agnos/selftest.cyr against this arm.
 #
-# ⚠ State is module-global, not per socket: one timeout, one TCP conn, one UDP
-# peer. taar is single-connection-at-a-time here, so a consumer that holds a
-# TCP connection open across a taar_resolve_ipv4 call can have it disturbed by
-# the resolver's TC retry. Per-socket state is a roadmap item.
+# Per-socket state. Each socket's timeout, connection, source port and
+# recorded peer live in a table slot of its own, so a resolve in the middle of
+# a consumer's sockets cannot touch them. Through 0.7.0 all four were module
+# globals: the resolver's TC retry dropped a consumer's live connection (and
+# leaked its kernel slot), the resolver's timeout replaced the consumer's, and
+# the resolver's UDP port and peer outlived its socket.
+#
+#   UDP fds are the kernel listener id (0..7) and index the UDP table.
+#   TCP fds are _TAAR_AG_TCP_FD_BASE + a slot of taar's own (64..71), above
+#   any listener id, so a UDP fd handed to a TCP call is refused rather than
+#   taken for another socket.
+#
+# Every call checks its fd against the table before indexing it. An fd taar did
+# not hand out, or has closed, is -1 (Linux answers -EBADF). Open initialises a
+# slot's every field and close only marks it free, so a stale field can never
+# be read: the lookup refuses a free slot.
+#
+# Still module-wide, correctly: _taar_ag_send_dl, which records what the
+# KERNEL supports rather than anything about one socket.
 # ===================================================================
 
-var _taar_ag_conn       = 0 - 1;     # active TCP conn_id (0..7), -1 = none
-var _taar_ag_src_port   = 0;         # bound UDP source port (for packed-ports)
-var _taar_ag_timeout_ms = 10000;     # recv-poll deadline window (set per-call)
-var _taar_ag_peer_ip    = 0;         # UDP peer recorded by taar_udp_send
-var _taar_ag_peer_port  = 0;         # 0 = none yet (accept any sender)
-var _taar_ag_send_dl    = 0;         # sock_send_dl#109: 0 unknown, 1 present, 2 absent
+var _TAAR_AG_SLOTS          = 8;       # the kernel's conn and listener tables are 8 deep
+var _TAAR_AG_TCP_FD_BASE    = 64;
+var _TAAR_AG_DEFAULT_TMO_MS = 10000;   # a new socket's deadline until one is set
+
+var _taar_ag_tcp_used: i64[8];         # 1 = open
+var _taar_ag_tcp_conn: i64[8];         # kernel conn_id, -1 = not connected
+var _taar_ag_tcp_tmo: i64[8];          # deadline ms, 0 = none
+var _taar_ag_udp_port: i64[8];         # bound source port; 0 = not a taar socket
+var _taar_ag_udp_peer_ip: i64[8];      # peer recorded by taar_udp_send
+var _taar_ag_udp_peer_port: i64[8];    # 0 = none yet (accept any sender)
+var _taar_ag_udp_tmo: i64[8];          # deadline ms, 0 = none
+var _taar_ag_send_dl = 0;              # sock_send_dl#109: 0 unknown, 1 present, 2 absent
 
 # Draw an ephemeral source port 49152..65535 from hardware entropy (RDRAND).
 # Returns -1 if the kernel would not supply entropy: a source port derived
@@ -322,27 +345,52 @@ fn _taar_ag_ephemeral_port(): i64 {
     return 49152 + (r & 0x3FFF);
 }
 
+# The table slot behind TCP fd `fd`, or -1 if `fd` is not an open taar TCP
+# socket. The range checks are what keep a bad fd from indexing past the table.
+fn _taar_ag_tcp_slot(fd): i64 {
+    var s = fd - _TAAR_AG_TCP_FD_BASE;
+    if (s < 0) { return 0 - 1; }
+    if (s >= _TAAR_AG_SLOTS) { return 0 - 1; }
+    if (load64(&_taar_ag_tcp_used + s * 8) == 0) { return 0 - 1; }
+    return s;
+}
+
+# The table slot behind UDP fd `fd` (its listener id), or -1 if `fd` is not a
+# listener taar_udp_open bound and has not closed.
+fn _taar_ag_udp_slot(fd): i64 {
+    if (fd < 0) { return 0 - 1; }
+    if (fd >= _TAAR_AG_SLOTS) { return 0 - 1; }
+    if (load64(&_taar_ag_udp_port + fd * 8) == 0) { return 0 - 1; }
+    return fd;
+}
+
 # --- UDP (DNS) ---
 
 # Bind an ephemeral UDP source port so the reply routes back. Returns the
-# listener_id (0..7) as the "fd", or <0 (entropy unavailable / table full).
+# listener_id (0..7) as the fd, or <0 (entropy unavailable / table full).
 fn taar_udp_open(): i64 {
     var port = _taar_ag_ephemeral_port();
     if (port < 0) { return 0 - 1; }
     var lid = sys_udp_bind(port);
     if (lid < 0) { return lid; }
-    _taar_ag_src_port = port;
-    _taar_ag_peer_ip = 0;
-    _taar_ag_peer_port = 0;
+    # The kernel's listener table is 8 deep, so no answer reaches this; it is
+    # here so an unexpected id cannot index past taar's tables. Untested.
+    if (lid >= _TAAR_AG_SLOTS) { sys_udp_unbind(lid); return 0 - 1; }
+    store64(&_taar_ag_udp_port + lid * 8, port);
+    store64(&_taar_ag_udp_peer_ip + lid * 8, 0);
+    store64(&_taar_ag_udp_peer_port + lid * 8, 0);
+    store64(&_taar_ag_udp_tmo + lid * 8, _TAAR_AG_DEFAULT_TMO_MS);
     return lid;
 }
 
-# No SO_RCVTIMEO on AGNOS — remember the timeout for the recv poll loop.
-# 0 = no deadline, as on Linux. Returns 0, or -1 for a negative timeout (Linux
-# refuses one too).
+# No SO_RCVTIMEO on AGNOS — remember this socket's timeout for the recv poll
+# loop. 0 = no deadline, as on Linux. Returns 0, or -1 for a negative timeout
+# (Linux refuses one too) or an fd that is not an open taar UDP socket.
 fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
+    var s = _taar_ag_udp_slot(fd);
+    if (s < 0) { return 0 - 1; }
     if (timeout_ms < 0) { return 0 - 1; }
-    _taar_ag_timeout_ms = timeout_ms;
+    store64(&_taar_ag_udp_tmo + s * 8, timeout_ms);
     return 0;
 }
 
@@ -351,11 +399,14 @@ fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
 # taar_udp_recv can drop other senders (see note 4 above). Returns pkt_len on
 # success, as Linux write(2) does: the kernel reports the frame length
 # (payload + 42 bytes of headers), which a caller comparing against pkt_len
-# would misread. -1 on failure.
+# would misread. -1 on failure or for an fd that is not an open taar UDP socket.
 fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
-    _taar_ag_peer_ip = packed_addr;
-    _taar_ag_peer_port = port & 0xFFFF;
-    var packed_ports = (_taar_ag_src_port << 16) | _taar_ag_peer_port;
+    var s = _taar_ag_udp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    var dport = port & 0xFFFF;
+    store64(&_taar_ag_udp_peer_ip + s * 8, packed_addr);
+    store64(&_taar_ag_udp_peer_port + s * 8, dport);
+    var packed_ports = (load64(&_taar_ag_udp_port + s * 8) << 16) | dport;
     var r = sys_udp_send(packed_addr, packed_ports, pkt, pkt_len);
     if (r > 0) { return pkt_len; }
     return r;
@@ -363,12 +414,15 @@ fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
 
 # Non-blocking kernel recv polled against an uptime_ms deadline. Returns bytes
 # received (>0), _TAAR_ERR_TIMEOUT on deadline expiry (matching what Linux
-# SO_RCVTIMEO yields), or a kernel error (<0). Polls at least once, so a reply
-# already waiting is returned even with a short deadline. A datagram from any
-# host but the peer taar_udp_send recorded is dropped and the wait continues.
-# The 5ms inter-poll sleep keeps us off a busy-spin.
+# SO_RCVTIMEO yields), or <0 (a kernel error, or an fd that is not an open taar
+# UDP socket). Polls at least once, so a reply already waiting is returned even
+# with a short deadline. A datagram from any host but the peer taar_udp_send
+# recorded for THIS socket is dropped and the wait continues. The 5ms
+# inter-poll sleep keeps us off a busy-spin.
 fn taar_udp_recv(fd, buf, maxlen): i64 {
-    var deadline = _taar_poll_deadline(sys_uptime_ms(), _taar_ag_timeout_ms);
+    var s = _taar_ag_udp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    var deadline = _taar_poll_deadline(sys_uptime_ms(), load64(&_taar_ag_udp_tmo + s * 8));
     var from[16];
     while (1) {
         store64(&from, 0);
@@ -376,7 +430,9 @@ fn taar_udp_recv(fd, buf, maxlen): i64 {
         var n = sys_udp_recv(fd, buf, maxlen, &from);
         if (n < 0) { return n; }
         if (n > 0) {
-            if (_taar_peer_match(&from, _taar_ag_peer_ip, _taar_ag_peer_port) == 1) { return n; }
+            var pip = load64(&_taar_ag_udp_peer_ip + s * 8);
+            var pport = load64(&_taar_ag_udp_peer_port + s * 8);
+            if (_taar_peer_match(&from, pip, pport) == 1) { return n; }
         }
         if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return _TAAR_ERR_TIMEOUT; }
         sys_sleep_ms(5);
@@ -385,43 +441,67 @@ fn taar_udp_recv(fd, buf, maxlen): i64 {
 }
 
 # Release the UDP listener (udp_unbind#54). Split from taar_sock_close, which
-# closes a TCP conn_id — on AGNOS these are different kernel objects.
+# closes a TCP connection — on AGNOS these are different kernel objects.
+# Returns the kernel result, or -1 for an fd that is not an open taar UDP
+# socket: a listener bound some other way is not taar's to unbind.
 fn taar_udp_close(fd): i64 {
+    var s = _taar_ag_udp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    store64(&_taar_ag_udp_port + s * 8, 0);
     return sys_udp_unbind(fd);
 }
 
 # --- TCP ---
 
-# No separate socket() on AGNOS — reset the conn slot; connect does the work.
+# No separate socket() on AGNOS — reserve a slot in taar's table; connect does
+# the kernel work. Returns the fd (64..71), or -1 when all 8 are in use (Linux:
+# -EMFILE).
 fn taar_tcp_open(): i64 {
-    _taar_ag_conn = 0 - 1;
-    return 0;
+    var s = 0;
+    while (s < _TAAR_AG_SLOTS) {
+        if (load64(&_taar_ag_tcp_used + s * 8) == 0) {
+            store64(&_taar_ag_tcp_used + s * 8, 1);
+            store64(&_taar_ag_tcp_conn + s * 8, 0 - 1);
+            store64(&_taar_ag_tcp_tmo + s * 8, _TAAR_AG_DEFAULT_TMO_MS);
+            return _TAAR_AG_TCP_FD_BASE + s;
+        }
+        s = s + 1;
+    }
+    return 0 - 1;
 }
 
-# No setsockopt on AGNOS — remember the deadline for recv (the poll loop) and
-# send (sock_send_dl#109). 0 = no deadline. Returns 0, or -1 for a negative
-# timeout. Expiry is _TAAR_ERR_TIMEOUT for both, as on Linux. The connect is
-# NOT bounded by it: sock_connect#47 carries its own ~8 s window (note 6).
+# No setsockopt on AGNOS — remember this socket's deadline for recv (the poll
+# loop) and send (sock_send_dl#109). 0 = no deadline. Returns 0, or -1 for a
+# negative timeout or an fd that is not an open taar TCP socket. Expiry is
+# _TAAR_ERR_TIMEOUT for both, as on Linux. The connect is NOT bounded by it:
+# sock_connect#47 carries its own ~8 s window (note 6).
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
+    var s = _taar_ag_tcp_slot(fd);
+    if (s < 0) { return 0 - 1; }
     if (timeout_ms < 0) { return 0 - 1; }
-    _taar_ag_timeout_ms = timeout_ms;
+    store64(&_taar_ag_tcp_tmo + s * 8, timeout_ms);
     return 0;
 }
 
 # sock_connect(dst_ip, dst_port, src_port) → conn_id 0..7 (BLOCKS ~8s) / -1.
-# Stashes the conn_id; returns 0 on success or the kernel's negative error.
+# Records the conn_id in this socket's slot. Returns 0 on success, the kernel's
+# negative error, or -1 for a bad fd or one already connected — Linux answers
+# -EISCONN; here a second connect would orphan the first conn's kernel slot.
 fn taar_tcp_connect(fd, packed_addr, port): i64 {
+    var s = _taar_ag_tcp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    if (load64(&_taar_ag_tcp_conn + s * 8) >= 0) { return 0 - 1; }
     var sport = _taar_ag_ephemeral_port();
     if (sport < 0) { return 0 - 1; }
     var conn = sys_sock_connect(packed_addr, port, sport);
     if (conn < 0) { return conn; }
-    _taar_ag_conn = conn;
+    store64(&_taar_ag_tcp_conn + s * 8, conn);
     return 0;
 }
 
-# One send on the active conn, its waiting bounded by `timeout_ms` (> 0) where
-# the kernel has sock_send_dl#109. Returns the kernel's answer: the committed
-# count (possibly 0 — "no progress yet") or -1.
+# One send on `conn`, its waiting bounded by `timeout_ms` (> 0) where the kernel
+# has sock_send_dl#109. Returns the kernel's answer: the committed count
+# (possibly 0 — "no progress yet") or -1.
 #
 # #109 is probed on first use: (conn, buf, 0, 0) answers 0 on a kernel that has
 # it and -1 before agnos 1.57.13. A -1 is also what a dead conn answers, so
@@ -430,28 +510,28 @@ fn taar_tcp_connect(fd, packed_addr, port): i64 {
 # later send its deadline. The fallback branch needs a pre-1.57.13 kernel; the
 # harness boots a newer one, so CI does not reach it (it was run once by hand
 # against agnos 1.57.12 — see the 0.7.0 CHANGELOG).
-fn _taar_ag_send_once(buf, len, timeout_ms): i64 {
+fn _taar_ag_send_once(conn, buf, len, timeout_ms): i64 {
     if (timeout_ms > 0) {
         if (_taar_ag_send_dl == 0) {
-            if (sys_sock_send_dl(_taar_ag_conn, buf, 0, 0) == 0) {
+            if (sys_sock_send_dl(conn, buf, 0, 0) == 0) {
                 _taar_ag_send_dl = 1;
             } else {
-                var r = sys_sock_send(_taar_ag_conn, buf, len);
+                var r = sys_sock_send(conn, buf, len);
                 if (r >= 0) { _taar_ag_send_dl = 2; }
                 return r;
             }
         }
         if (_taar_ag_send_dl == 1) {
-            return sys_sock_send_dl(_taar_ag_conn, buf, len, timeout_ms * 1000);
+            return sys_sock_send_dl(conn, buf, len, timeout_ms * 1000);
         }
     }
-    return sys_sock_send(_taar_ag_conn, buf, len);
+    return sys_sock_send(conn, buf, len);
 }
 
 # Send up to `len` bytes. Returns bytes sent (> 0, possibly < len — the caller
 # loops), 0 for len <= 0, _TAAR_ERR_TIMEOUT when nothing could be sent before
 # the socket's deadline (what SO_SNDTIMEO makes Linux write(2) return), or -1
-# with no connection or a dead one. With no deadline set it waits for
+# for a bad fd, no connection, or a dead one. With no deadline set it waits for
 # progress, as a blocking Linux write(2) does.
 #
 # Through 0.6.2 this was a bare sock_send#48, which ignores the timeout and
@@ -459,35 +539,41 @@ fn _taar_ag_send_once(buf, len, timeout_ms): i64 {
 # (whirl's send loop does, up to 1000 times) waited hours on a stalled peer
 # that Linux would have cut off at the caller's deadline.
 fn taar_tcp_send(fd, buf, len): i64 {
+    var s = _taar_ag_tcp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    var conn = load64(&_taar_ag_tcp_conn + s * 8);
     # Redundant today — the kernel refuses conn -1 on both #48 and #109, and
     # removing this line leaves the harness green. Kept so the -1 is taar's
     # contract rather than a kernel detail, and to skip probing #109 on a
     # conn that does not exist.
-    if (_taar_ag_conn < 0) { return 0 - 1; }
+    if (conn < 0) { return 0 - 1; }
     # Load-bearing beyond tidiness: the kernel answers 0 for an empty send,
     # which below reads as a timeout — or, with no deadline, loops forever.
     if (len <= 0) { return 0; }
+    var tmo = load64(&_taar_ag_tcp_tmo + s * 8);
     while (1) {
-        var n = _taar_ag_send_once(buf, len, _taar_ag_timeout_ms);
+        var n = _taar_ag_send_once(conn, buf, len, tmo);
         if (n != 0) { return n; }
-        if (_taar_ag_timeout_ms > 0) { return _TAAR_ERR_TIMEOUT; }
+        if (tmo > 0) { return _TAAR_ERR_TIMEOUT; }
     }
     return _TAAR_ERR_TIMEOUT;
 }
 
 # Poll sock_recv#49 (>0 data / 0 WOULD_BLOCK / -1 EOF) against the deadline,
 # mapping to the Linux blocking-read sense. Returns bytes read (>0), 0 when the
-# peer closed cleanly, _TAAR_ERR_TIMEOUT on deadline expiry, or -1 with no
-# connection (never connected, or closed). Polls at least once.
+# peer closed cleanly (or maxlen <= 0, as read(2) answers), _TAAR_ERR_TIMEOUT
+# on deadline expiry, or -1 for a bad fd or no connection (never connected, or
+# closed). Polls at least once.
 #
 # The no-connection check is not cosmetic: the kernel answers -1 for conn -1,
 # and -1 is what this loop maps to "peer closed" — so through 0.6.2 a read on
 # a socket that never connected told the caller its peer had hung up cleanly.
 #
 # ⚠ The kernel answers -1 for EOF AND for a reset or dead connection, so both
-# read as 0 here, where Linux returns -ECONNRESET for the second. taar cannot
-# tell them apart until sock_recv#49 does; a consumer reading to EOF on AGNOS
-# can mistake a mid-body reset for a complete response. Tracked in the roadmap.
+# read as 0 here, where Linux returns -ECONNRESET for the second; a consumer
+# reading to EOF on AGNOS can mistake a mid-body reset for a complete response.
+# epoll_wait#21 tells them apart (EPOLLERR for a dead conn, agnos 1.57.17), but
+# its cyrius wrapper cannot yet watch a conn. Tracked in the roadmap.
 #
 # Through 0.4.0 a deadline expiry also returned 0 — indistinguishable from a
 # clean close, so a peer that stalled mid-body made a truncated read look like
@@ -497,10 +583,17 @@ fn taar_tcp_send(fd, buf, len): i64 {
 # already returned -11 on timeout. The AGNOS TCP path was the only place the
 # two collapsed, against a module contract that promises an identical surface.
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
-    if (_taar_ag_conn < 0) { return 0 - 1; }
-    var deadline = _taar_poll_deadline(sys_uptime_ms(), _taar_ag_timeout_ms);
+    var s = _taar_ag_tcp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    var conn = load64(&_taar_ag_tcp_conn + s * 8);
+    if (conn < 0) { return 0 - 1; }
+    # The kernel answers 0 ("nothing yet") for maxlen <= 0, which the loop
+    # below would poll until the deadline — or, with none, forever. Linux
+    # read(2) returns 0 at once; so does this.
+    if (maxlen <= 0) { return 0; }
+    var deadline = _taar_poll_deadline(sys_uptime_ms(), load64(&_taar_ag_tcp_tmo + s * 8));
     while (1) {
-        var n = sys_sock_recv(_taar_ag_conn, buf, maxlen);
+        var n = sys_sock_recv(conn, buf, maxlen);
         if (n > 0) { return n; }
         if (n < 0) { return 0; }        # -1 = EOF → "peer closed" (see ⚠ above)
         if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return _TAAR_ERR_TIMEOUT; }
@@ -509,13 +602,16 @@ fn taar_tcp_recv(fd, buf, maxlen): i64 {
     return _TAAR_ERR_TIMEOUT;
 }
 
-# Close the active TCP conn (sock_close#50) and clear the slot. Safe to call
-# when no conn is open. Returns the kernel result, or 0 if there was nothing
-# to close.
+# Close this socket's conn (sock_close#50), if it has one, and free its slot.
+# Returns the kernel result (0 when there was no conn to close), or -1 for an fd
+# that is not an open taar TCP socket — closing twice is an error, as on Linux.
 fn taar_sock_close(fd): i64 {
-    if (_taar_ag_conn < 0) { return 0; }
-    var r = sys_sock_close(_taar_ag_conn);
-    _taar_ag_conn = 0 - 1;
+    var s = _taar_ag_tcp_slot(fd);
+    if (s < 0) { return 0 - 1; }
+    var r = 0;
+    var conn = load64(&_taar_ag_tcp_conn + s * 8);
+    if (conn >= 0) { r = sys_sock_close(conn); }
+    store64(&_taar_ag_tcp_used + s * 8, 0);
     return r;
 }
 

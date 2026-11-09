@@ -8,10 +8,10 @@
 
 ## Version
 
-**0.7.0** — 2026-11-09. Last P(-1) review (0.6.2):
+**0.7.1** — 2026-11-09. Last P(-1) review (0.6.2):
 [`docs/audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
 
-`dist/taar.cyr` is 1226 lines (`wc -l`; `cyrius distlib` reports 1209, excluding
+`dist/taar.cyr` is 1322 lines (`wc -l`; `cyrius distlib` reports 1305, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
 same bundle).
 
@@ -43,7 +43,7 @@ same bundle).
 | Module | Surface | Since |
 |--------|---------|-------|
 | `ipv4` | `ipv4_parse`, `ipv4_format_to_buf` | 0.1.0 |
-| `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0; TCP timeout bounds connect + send, AGNOS reply-source filter 0.6.2; AGNOS executed, send deadline + no-connection errors 0.7.0 |
+| `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0; TCP timeout bounds connect + send, AGNOS reply-source filter 0.6.2; AGNOS executed, send deadline + no-connection errors 0.7.0; per-socket AGNOS state, fd validation 0.7.1 |
 | `dns` | `taar_resolve_ipv4` — resolver discovery, RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC | 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0; fail-closed resolver choice 0.6.2 |
 
 Planned modules and their triggers live in [`roadmap.md`](roadmap.md).
@@ -63,9 +63,10 @@ RFC-1035 framing that reaches the kernel only through `socket`'s helpers. The
 | `yo` | ping / ICMP | on `[deps.taar]`, in-tree `ipv4.cyr` dropped; still carries `icmp.cyr` | 0.6.2 |
 
 All three are on cyrius `6.7.18`, taar's own pin. `yo` and `dig` call only
-`ipv4`, which 0.7.0 does not change. `whirl` is the consumer 0.7.0 is for: its
-AGNOS sends were unbounded by its 10 s deadline until it bumps (roadmap,
-*Consumer migration*).
+`ipv4`, which 0.7.x does not change. `whirl` is the consumer 0.7.x is for: on
+AGNOS its sends are unbounded by its 10 s deadline, and its resolve shares
+socket state with its HTTP connection, until it bumps (roadmap, *Consumer
+migration*).
 
 ## Verification
 
@@ -94,10 +95,12 @@ What is actually gated, and what is not.
   1.57.19 with the gnoboot 0.9.0 loader under QEMU + OVMF — both release
   binaries checked against SHA-256s pinned in `tests/agnos/pins.sh` — with
   `tests/agnos/selftest.cyr` as `/bin/agnsh`, the kernel's first program.
-  **53 checks**, ~15 s with KVM: UDP (open, timeouts, payload-count send,
+  **84 checks**, ~15 s with KVM (~23 s under TCG, `TAAR_AGNOS_TCG=1`): UDP (open, timeouts, payload-count send,
   reply-source filter with a non-vacuity check that the forgeries arrive,
   fresh-socket peer reset), TCP (connect, send, read to EOF, recv and send
-  deadlines, refused and SYN-dropped connects, no-connection errors), and
+  deadlines, refused and SYN-dropped connects, no-connection errors), per-socket
+  state (fd validation, the 8-slot TCP table, fresh-socket defaults, and a
+  consumer's TCP and UDP sockets surviving a resolve intact), and
   `taar_resolve_ipv4` end to end through the kernel's DHCP lease against
   `fake_dns.py bylabel` (TC=0, TC retry, three TCP-failure fallbacks, a forged
   reply). Peers and the fake resolver run in a private user + net + mount + PID
@@ -131,7 +134,13 @@ acceptance check in `dns.cyr`, or any of the 0.6.2 guards in `socket.cyr`
 mutation-checked through the harness: 14 mutations at 0.7.0 (source filter and
 each half of the peer match, payload-count send, both negative-timeout checks,
 timeout 0, the fresh-socket peer reset, recv's timeout code, the send deadline,
-its 0 → timeout map, the empty-send and no-connection guards), all red but one.
+its 0 → timeout map, the empty-send and no-connection guards), all red but one;
+17 more at 0.7.1 for the per-socket tables (fd range and open checks, each
+field open initialises, close freeing a slot, the connect-on-connected refusal,
+the table bound, the empty-recv guard), 16 red, with the 0.7.0 set re-run
+against the rewritten arm. The green one widens the TCP table's scan bound from
+8 to 16: the slots past the table read the connection table's -1 entries as "in
+use", so nothing changes. Removing the bound outright is red.
 The Linux forged-reply case was checked the same way (unconnected `sendto`
 accepts the forgery). The exceptions are all commented in-source:
 - the `ptr >= msg_len` check in `_taar_dns_skip_name` (redundant given the
@@ -148,12 +157,15 @@ accepts the forgery). The exceptions are all commented in-source:
 
 ## Carry-forward
 
-- **AGNOS differs from Linux in four known ways**, all in
-  [`roadmap.md`](roadmap.md) 0.7.x: module-global socket state shared between
-  the resolver and a consumer; EOF indistinguishable from a reset; a connect
-  bounded by the kernel's ~8 s rather than the caller's timeout; and a UDP
-  listener that keeps one datagram, so a stray arrival can evict a DNS reply
-  (a failed resolve, never a wrong one). The last three need kernel changes.
+- **AGNOS differs from Linux in three known ways**, all in
+  [`roadmap.md`](roadmap.md) 0.7.x: EOF indistinguishable from a reset, and a
+  connect bounded by the kernel's ~8 s rather than the caller's timeout — agnos
+  already has the ABI for both, and they wait on cyrius stdlib wrappers (open
+  cyrius issues); and a UDP listener that keeps one datagram, so a stray arrival
+  can evict a DNS reply (a failed resolve, never a wrong one) — filed with agnos
+  as issue `2026-11-09-a-udp-listener-keeps-one-datagram-…`.
+- **AGNOS fds are taar's, not the kernel's, for TCP**: 64..71, eight at most
+  (the kernel's conn table). UDP fds are the kernel listener id, 0..7.
 - **Resolve waits are bounded per call, not per resolve** — no monotonic clock
   in the consumers' stdlib. Worst case UDP 8 × 5 s; the TCP retry 5 s connect +
   16 reads × 5 s.

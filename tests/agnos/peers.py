@@ -25,6 +25,7 @@ TCP
                     the connect never completes
   7205  sink        accepts with a small receive buffer and never reads, so
                     the guest's sends stop making progress
+  7206  slow echo   reads once, echoes it after SLOW_S, then closes
 
 FORGE_ADDR (192.0.2.1, TEST-NET-1) is added to this namespace's loopback by
 run.sh. QEMU passes a reply from a host address other than 127.0.0.1 through
@@ -114,6 +115,20 @@ def tcp_echo(s):
             conn.close()
 
 
+def tcp_slow_echo(s):
+    while True:
+        conn, _ = s.accept()
+        data = conn.recv(4096)
+
+        def reply(c=conn, d=data):
+            try:
+                if d:
+                    c.sendall(d)
+            finally:
+                c.close()
+        threading.Timer(SLOW_S, reply).start()
+
+
 def tcp_silent(s):
     while True:
         conn, _ = s.accept()
@@ -127,6 +142,7 @@ forever(udp_burst, udp(7105))
 forever(tcp_echo, tcp_listener(7201))
 forever(tcp_silent, tcp_listener(7202))
 forever(tcp_silent, tcp_listener(7205, rcvbuf=SINK_RCVBUF))
+forever(tcp_slow_echo, tcp_listener(7206))
 # 7203: deliberately unbound.
 blackhole = tcp_listener(7204, backlog=0)
 held.append(socket.create_connection((LO, 7204)))    # fills the queue
