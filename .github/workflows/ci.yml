@@ -39,7 +39,7 @@ jobs:
         # Hard gate: any `warn` line fails CI (matches patra / sigil / agnosys).
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr; do
+          for f in src/*.cyr programs/*.cyr tests/*.tcyr; do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
             if echo "$out" | grep -qE '^[[:space:]]*warn '; then
@@ -49,13 +49,13 @@ jobs:
           [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
 
       - name: Doc coverage
-        # Every public fn in src/ and programs/ carries a doc comment as of
-        # 0.5.0 — the same scope `cyrius audit` reports on. Gate it so
-        # that does not quietly rot — `cyrius audit` reports the count but does
-        # not fail on it.
+        # Every public fn in src/, programs/ and tests/ carries a doc comment —
+        # the same scope `cyrius audit` reports on (tests/ joined it at cyrius
+        # 6.6.20). Gate it so that does not quietly rot — `cyrius audit`
+        # reports the count but does not fail on it.
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr; do
+          for f in src/*.cyr programs/*.cyr tests/*.tcyr; do
             out=$(cyrius doc --check "$f" 2>&1 || true)
             echo "$f: $(echo "$out" | tail -1)"
             if echo "$out" | grep -q 'undocumented: '; then

@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-08
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.** No behaviour change. All **93 assertions**
+  pass on x86_64 and on aarch64 (executed under `qemu-aarch64`), the AGNOS
+  build still compiles with its arm selected, and all five TC-fallback cases
+  pass. `lib/` re-vendored to 19 files, each byte-identical to the 6.6.20
+  bundled stdlib; `vec`, `poison` and `alloc_cx` now come in transitively.
+- **`dist/taar.deps` lists only what the bundle uses: `syscalls`, `fmt`.**
+  Since 6.6.18, `distlib` derives the sidecar by compile-verifying the bundle
+  instead of copying `[deps] stdlib`, so the test-only `assert` and `alloc`
+  (and `vec`) no longer go out to consumers. The bundle also gains a
+  `# Requires` block (`include "lib/syscalls.cyr"`, `include "lib/fmt.cyr"`),
+  which makes it includable on its own. No consumer is affected: `yo`, `dig`
+  and `whirl` already declare all five leaves themselves.
+- **CI lint and doc gates now cover `tests/`.** 6.6.20's `cyrius audit` added
+  `tests/` to its scope. That surfaced 3 lint warnings (two lines over 120
+  characters, one double blank line) and 3 undocumented fns (`test_dns_build`,
+  `test_dns_parse_a`, `main`) in `tests/taar.tcyr`, all now fixed. The CI gates
+  say they cover the same scope as `audit`, so they were widened to match.
+
+### Documentation
+
+- **`src/socket.cyr` said the stdlib has no `sendto` wrapper.** It has had
+  `sys_sendto` (`SYS_SENDTO` 44 / 206) since cyrius 6.6.5. Only the comments
+  changed. `taar_udp_send` keeps connect-then-write, since RFC 5452 off-path
+  rejection justifies it on its own.
+- **roadmap: dropped "file the stdlib clock/sleep/sendto gap upstream".** That
+  gap is closed at 6.6.20. `sys_sendto` and `sys_nanosleep` exist on both Linux
+  arches, and `clock_now_ns` / `sleep_ms` were checked under `qemu-aarch64`
+  (a 50 ms sleep measured 50.3 ms).
+- **state.md was two releases stale.** It still said 0.5.0 on `6.5.35`, and its
+  consumer table and carry-forward had every consumer pinning taar `0.3.1`. All
+  three pin `0.5.0`. Refreshed, and the 0.3.1 carry-forward removed. The README
+  status line, example tag, toolchain pin and dependency paragraph are refreshed
+  too.
+- The benign `vec_get` build-warning note is gone, since the warning no longer
+  appears. It is replaced by the `sys_openat (x86_64-windows)` note that
+  6.6.18's `distlib` verify now prints. Windows is not a taar target.
+
 ## [0.5.1] - 2026-09-11
 
 ### Changed

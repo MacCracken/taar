@@ -30,15 +30,16 @@
 # The exceptions are the numbers it deliberately cannot remap — those that
 # collide with a different native aarch64 call — and they fail SILENTLY.
 # taar shipped one: sendto. x86_64 44 is sendto; aarch64 44 is fstatfs(2), and
-# there is no ESYSXLAT entry (nor stdlib wrapper) for it. Verified under
+# there was no ESYSXLAT entry (nor, until cyrius 6.6.5, a stdlib wrapper) for
+# it. Verified under
 # qemu-aarch64: the old raw `syscall(44, fd, pkt, len, …)` returned 0 as though
 # it had sent nothing, wrote ~120 bytes of struct statfs over the caller's
 # packet buffer, and left every DNS resolve to time out. A --aarch64 build was
 # clean; only running it showed the break.
 #
 # So: go through the stdlib's arch-dispatched sys_* wrappers. Where one does
-# not exist (there is no sendto wrapper), restructure to a call that has one —
-# see taar_udp_send, which connects and write(2)s instead.
+# not exist, restructure to a call that has one — taar_udp_send connects and
+# write(2)s, which is how taar avoided sendto before 6.6.5 added `sys_sendto`.
 
 # ===================================================================
 # Shared (backend-independent) — pure address packing, no syscalls.
@@ -108,10 +109,10 @@ fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
 #      source address/port is not the peer, so an off-path attacker must guess
 #      the ephemeral source port on top of the 16-bit DNS ID. Unconnected, any
 #      host that guessed the ID alone could land a forged answer (RFC 5452).
-#   2. Portability. The stdlib exposes no sendto wrapper and no SYS_SENDTO
-#      constant, and hardcoding 44 is exactly the aarch64 misroute this module
-#      is fixing (44 is fstatfs there). write(2) on a connected socket needs
-#      neither.
+#   2. Portability (historical). Until cyrius 6.6.5 the stdlib had no sendto
+#      wrapper and no SYS_SENDTO, and hardcoding 44 was the aarch64 misroute
+#      fixed in 0.3.3 (44 is fstatfs there). `sys_sendto` exists now, so this
+#      reason no longer applies; reason 1 alone keeps connect-then-write.
 # Re-connecting a UDP socket to a new peer is legal and cheap, so per-send
 # connect keeps the (fd, addr, port) signature intact. Bytes sent, or <0.
 fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {

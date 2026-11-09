@@ -93,6 +93,7 @@ fn test_dns_encode() {
     assert_eq(load8(out + 12), 0, "root label terminator");
 }
 
+# === dns: query builder (header id / RD flag / qdcount) ===
 fn test_dns_build() {
     test_group("dns-build");
     var qb = alloc(300);
@@ -119,12 +120,17 @@ fn _canned_a_response(buf): i64 {
     store8(buf + off, 0xC0); store8(buf + off + 1, 0x0C); off = off + 2;   # answer name ptr -> 12
     _taar_dns_store_u16(buf, off, 1); off = off + 2;   # type A
     _taar_dns_store_u16(buf, off, 1); off = off + 2;   # class IN
-    store8(buf + off, 0); store8(buf + off + 1, 0); store8(buf + off + 2, 0x0E); store8(buf + off + 3, 0x10); off = off + 4;   # ttl 3600
+    # ttl 3600 (0x00000E10)
+    store8(buf + off, 0); store8(buf + off + 1, 0);
+    store8(buf + off + 2, 0x0E); store8(buf + off + 3, 0x10); off = off + 4;
     _taar_dns_store_u16(buf, off, 4); off = off + 2;   # rdlength
-    store8(buf + off, 93); store8(buf + off + 1, 184); store8(buf + off + 2, 216); store8(buf + off + 3, 34); off = off + 4;
+    # rdata 93.184.216.34
+    store8(buf + off, 93); store8(buf + off + 1, 184);
+    store8(buf + off + 2, 216); store8(buf + off + 3, 34); off = off + 4;
     return off;
 }
 
+# === dns: A-record parse over a canned NOERROR response ===
 fn test_dns_parse_a() {
     test_group("dns-parse-a");
     var buf = alloc(128);
@@ -133,7 +139,6 @@ fn test_dns_parse_a() {
     assert_eq(_taar_dns_hdr_rcode(buf), 0, "rcode NOERROR");
     assert_eq(_taar_dns_first_a(buf, len), 0x5DB8D822, "A record 93.184.216.34");
 }
-
 
 # === dns: reply acceptance (RFC 5452 binding) ===
 fn test_dns_reply_match() {
@@ -317,6 +322,7 @@ fn test_socket_recv_contract() {
     return 0;
 }
 
+# Suite entry: runs every group in order; exit code is the failure count.
 fn main() {
     alloc_init();
     test_ipv4_parse();

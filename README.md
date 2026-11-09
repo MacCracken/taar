@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.5.0.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.5.2.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -59,23 +59,24 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.5.0"
+tag = "0.5.2"
 modules = ["dist/taar.cyr"]
 ```
 
 Then `include "lib/taar.cyr"` after `cyrius deps`.
 
-The dist bundle leaves stdlib symbols (`fmt_int_buf`, `store8`, the `sys_*`
-wrappers, …) unresolved by design — they come from the consumer's own
-`[deps] stdlib`. The bundle needs exactly two leaves in scope: **`syscalls`
-and `fmt`**. `cyrius distlib` also emits `dist/taar.deps`, but that file
-echoes taar's full `[deps] stdlib` (which additionally carries `assert` and
-`alloc` for taar's own test suite), so it over-declares — harmless, but it is
-not the bundle's real requirement.
+The dist bundle carries no stdlib code. Stdlib symbols (`fmt_int_buf`,
+`store8`, the `sys_*` wrappers, …) come from the consumer's `lib/`. The bundle
+needs exactly two stdlib leaves, **`syscalls` and `fmt`**, and names them in two
+places: `dist/taar.deps` (the sidecar `cyrius deps` reads) and a `# Requires`
+block of `include "lib/syscalls.cyr"` / `include "lib/fmt.cyr"` at the top of
+`dist/taar.cyr`. cyrius's distlib compile-verifies both (6.6.18+). taar's own
+`[deps] stdlib` also lists `assert` and `alloc` for the test suite, but those
+no longer reach consumers.
 
 ## Build & test
 
-Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.5.35`); run
+Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.6.20`); run
 `cyrius deps` first to vendor the stdlib into `lib/`.
 
 ```sh

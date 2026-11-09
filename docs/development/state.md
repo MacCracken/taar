@@ -8,28 +8,30 @@
 
 ## Version
 
-**0.5.0** — 2026-08-26.
+**0.5.2** — 2026-11-08.
 
-`dist/taar.cyr` is 979 lines (`wc -l`; `cyrius distlib` reports 966, excluding
-its 13-line generated header — the two numbers are the same bundle).
+`dist/taar.cyr` is 984 lines (`wc -l`; `cyrius distlib` reports 967, excluding
+its 17-line generated header and `# Requires` block — the two numbers are the
+same bundle).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.35` (`cyrius.cyml [package].cyrius`) — the single source
+- **Cyrius pin**: `6.6.20` (`cyrius.cyml [package].cyrius`) — the single source
   of truth. Both CI workflows read it to install the toolchain; no version is
   hardcoded in YAML.
-- **`lib/`** is a `cyrius deps` build artifact (gitignored), not source.
+- **`lib/`** is a `cyrius deps` build artifact (gitignored), not source. At this
+  pin it resolves to 19 files, every one byte-identical to the 6.6.20 bundled
+  stdlib snapshot.
 - **Dependency surface.** `[deps] stdlib` is `syscalls`, `fmt`, `assert`,
-  `alloc` — but that is taar's *build* list, not what a consumer needs. The
-  shipped bundle references only `syscalls` and `fmt`; `assert` is for the test
-  suite and pulls `alloc` in transitively (`lib/assert.cyr` includes
-  `lib/alloc.cyr`). `dist/taar.deps` echoes the full `[deps] stdlib`, so it
-  over-declares for consumers. Harmless, but do not read it as the bundle's
-  real requirement.
-- Known benign build warning: `undefined function 'vec_get'` — a `vec`-args
-  variadic path in `lib/fmt.cyr` that taar never calls (it uses `fmt_int_buf`
-  only); dead-code-eliminated. Adding `vec` would push a dep onto consumers
-  that don't carry it.
+  `alloc` — taar's *build* list. What a consumer needs is what `distlib`'s
+  compile-verify derives: **`syscalls` and `fmt`**, written to both
+  `dist/taar.deps` and the bundle's `# Requires` block. `assert` and `alloc`
+  are test-suite only and do not reach the sidecar.
+- Known benign `distlib` warning: `sys_openat (x86_64-windows)` still undefined
+  after the sidecar verify. taar's non-AGNOS `socket` arm is Linux-only
+  (`sys_openat` lives in `lib/syscalls_linux_common.cyr`), and Windows is not a
+  taar target. The verify compiles six targets and reports the gap; it does not
+  fail the run.
 
 ## Modules
 
@@ -54,9 +56,13 @@ RFC-1035 framing that reaches the kernel only through `socket`'s helpers. The
 
 | Consumer | Role | Adoption | Pinned at |
 |----------|------|----------|-----------|
-| `whirl` | curl/wget (HTTP/S) | fully migrated — HTTP transport on `taar_tcp_*` + `taar_resolve_ipv4` | 0.3.1 |
-| `dig` | DNS resolver | on `[deps.taar]`, in-tree `ipv4.cyr` dropped; own `dns.cyr` + `resolv.cyr` still to dedup | 0.3.1 |
-| `yo` | ping / ICMP | on `[deps.taar]`, in-tree `ipv4.cyr` dropped; still carries `icmp.cyr` | 0.3.1 |
+| `whirl` | curl/wget (HTTP/S) | fully migrated — HTTP transport on `taar_tcp_*` + `taar_resolve_ipv4` | 0.5.0 |
+| `dig` | DNS resolver | on `[deps.taar]`, in-tree `ipv4.cyr` dropped; own `dns.cyr` + `resolv.cyr` still to dedup | 0.5.0 |
+| `yo` | ping / ICMP | on `[deps.taar]`, in-tree `ipv4.cyr` dropped; still carries `icmp.cyr` | 0.5.0 |
+
+All three are on cyrius `6.6.2` and already declare every leaf the sidecar
+used to over-report (`assert`, `alloc`, `vec`) in their own `[deps] stdlib`, so
+the slimmer 0.5.2 sidecar does not change what they vendor.
 
 ## Verification
 
@@ -64,8 +70,9 @@ What is actually gated, and what is not.
 
 **Automated (CI: `build`, `aarch64`, `integration`, `security`, `docs`)**
 
-- `cyrius audit` — fmt, lint, docs and tests all green. Lint and doc coverage
-  are hard gates in the `build` job; `audit` alone only reports them.
+- `cyrius audit` — fmt, lint, docs and tests all green over `src/`,
+  `programs/` and `tests/`. Lint and doc coverage are hard gates in the `build`
+  job over the same three directories; `audit` alone only reports them.
 - **x86_64**: smoke round-trip; unit suite **93 passed / 0 failed**.
 - **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 93
   passed / 0 failed. This leg exists because the 0.3.3 `sendto` defect built
@@ -93,9 +100,6 @@ it is kept because it is what makes the header reads above it in-bounds).
 
 ## Carry-forward
 
-- **Consumers all pin `taar 0.3.1`**, so none carry the 0.3.3 security fixes or
-  anything since. Highest-value open item family-wide; consumer-repo work,
-  handled separately. See [`roadmap.md`](roadmap.md).
 - **The AGNOS backend has no executed coverage.** With lint, docs, aarch64 and
   the TC path all gated, this is the largest untested surface in the repo.
 - **`ipv4_parse` accepts leading zeros as decimal** — a pending decision, not a

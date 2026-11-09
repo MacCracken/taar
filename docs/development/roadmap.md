@@ -33,20 +33,6 @@ Ordered by value, not by sequence — none of these blocks another.
   provides; `whirl` carries the rest.
   **Trigger has not fired.** Waits for a second consumer needing them.
 
-- **File the stdlib clock/sleep/sendto gap upstream against cyrius.** taar works
-  around it, and `dig` 0.3.7 hit the same wall and worked around it differently.
-  At 6.5.35 the stdlib exposes **no wrapper and no named constant** for
-  `sendto`, `nanosleep` or `clock_gettime` on either Linux arch, so every
-  consumer needing a monotonic clock or a sleep must hardcode a number — the
-  exact thing that made `dig`'s aarch64 builds call `unlinkat` for its retry
-  backoff. Worse, `lib/chrono.cyr` has the same latent bug it would fix: its
-  non-macOS non-Windows arm is a bare `syscall(228, CLOCK_MONOTONIC, &ts)` with
-  **no aarch64 arm**, and 228 is not `clock_gettime` on aarch64 (113 is) — it is
-  not in cyrius's own aarch64 table at all. Two first-party consumers hitting
-  one gap independently is the filing threshold. Per the operating rule the
-  cyrius tree is not modified from a consumer repo, so this is a filing, not a
-  patch.
-
 - **`ipv4_parse` leading-zero policy** — a decision, not a defect.
   `010.1.1.1` parses as decimal 10.1.1.1 where `inet_aton(3)` reads octal and
   says 8.1.1.1. Harmless while callers consume the packed return value, but a
