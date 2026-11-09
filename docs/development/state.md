@@ -8,7 +8,7 @@
 
 ## Version
 
-**0.6.0** — 2026-11-08.
+**0.6.1** — 2026-11-08.
 
 `dist/taar.cyr` is 984 lines (`wc -l`; `cyrius distlib` reports 967, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
@@ -16,11 +16,11 @@ same bundle).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (`cyrius.cyml [package].cyrius`) — the single source
+- **Cyrius pin**: `6.7.18` (`cyrius.cyml [package].cyrius`) — the single source
   of truth. Both CI workflows read it to install the toolchain; no version is
   hardcoded in YAML.
 - **`lib/`** is a `cyrius deps` build artifact (gitignored), not source. At this
-  pin it resolves to 19 files, every one byte-identical to the 6.7.9 bundled
+  pin it resolves to 19 files, every one byte-identical to the 6.7.18 bundled
   stdlib snapshot.
 - **Dependency surface.** `[deps] stdlib` is `syscalls`, `fmt`, `assert`,
   `alloc` — taar's *build* list. What a consumer needs is what `distlib`'s

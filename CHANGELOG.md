@@ -4,6 +4,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-08
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (the latest cyrius release). No source
+  change was needed. The 6.7.10–6.7.18 migration notes were checked against
+  every stdlib symbol taar calls. The notes that name one of them are about
+  Windows, macOS or a raw negative fd on AGNOS. taar's AGNOS arm closes and
+  sends through `sys_sock_close` / `sys_sock_send`, so none applies. The new
+  lint rule for constant overruns of a `var a[N]` buffer reports nothing.
+
+  All **93 assertions** pass on x86_64 and on aarch64 (executed under
+  `qemu-aarch64`), the AGNOS build still compiles with its arm selected, all
+  five TC-fallback cases pass, and both live smokes (UDP and TCP) resolved.
+  `lib/` was re-vendored: the same 19 files, each byte-identical to the 6.7.18
+  bundled stdlib.
+- **`dist/taar.cyr` differs from 0.6.0 only in its version line**, and the
+  sidecar is still `syscalls` + `fmt`. The bundle body is byte-identical to
+  0.6.0's, so it still builds on consumers' cyrius `6.6.2`.
+
 ## [0.6.0] - 2026-11-08
 
 ### Changed
