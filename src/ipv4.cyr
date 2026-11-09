@@ -26,7 +26,9 @@
 # refuse them; through 0.8.1 taar read them as decimal.
 
 var TAAR_IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
-# DEPRECATED (0.9.1, removed at 1.0.0 — ADR 0002): the pre-0.9.1 name.
+# DEPRECATED (0.9.1, removed at 1.0.0 — ADR 0002): the pre-0.9.1 name. Not
+# marked #deprecated: cyrius has no such mark for a var, and one written here
+# would attach to the next fn (cyrius issue 2026-11-09).
 var IPV4_PARSE_FAIL = 0 - 1;
 
 # Parse a dotted-quad into a packed u32. Returns the packed address on

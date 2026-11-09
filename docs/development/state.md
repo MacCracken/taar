@@ -11,7 +11,7 @@
 **0.9.1** — 2026-11-09. Last P(-1) review (0.6.2):
 [`docs/audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
 
-`dist/taar.cyr` is 1635 lines (`wc -l`; `cyrius distlib` reports 1618, excluding
+`dist/taar.cyr` is 1640 lines (`wc -l`; `cyrius distlib` reports 1623, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
 same bundle).
 

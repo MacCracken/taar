@@ -69,6 +69,9 @@ var TAAR_ERR_INTR = 0 - 4;
 # DEPRECATED (0.9.1, removed at 1.0.0): the pre-0.9.1 spellings of the two
 # constants above. ADR 0001 names them as the error values a caller may test,
 # so the leading underscore — taar's mark for internal — was wrong.
+# Not marked #deprecated: cyrius 6.7.18 has no such mark for a var, and one
+# written here attaches to the next fn instead (cyrius issue
+# 2026-11-09-an-attribute-before-a-var-attaches-to-the-next-fn).
 var _TAAR_ERR_TIMEOUT = 0 - 11;
 var _TAAR_ERR_INTR = 0 - 4;
 

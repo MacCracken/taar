@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **Filed upstream** for taar's open items, in each project's file-based
+  tracker:
+  - **cyrius** `issues/2026-11-09-syscalls-has-no-monotonic-clock.md`, with a
+    repro. The `syscalls` leaf can't read a monotonic clock, so a library pays
+    for all of `chrono` or writes a syscall literal (yo does). taar's
+    per-resolve deadline waits on this, or on yo adopting `chrono`, which is
+    now on yo's roadmap.
+  - **cyrius** `issues/2026-11-09-an-attribute-before-a-var-attaches-to-the-next-fn.md`,
+    with a repro. A `#deprecated` or `#must_use` written before a `var` or
+    `const` is not refused: it silently marks the next function, here an
+    unrelated one, with the constant's message, and lint stays at 0 warnings.
+    taar's deprecated-constant comments now say not to add one.
+  - **cyrius** `proposals/2026-11-09-deprecated-constants.md`, asking for
+    `#deprecated` on a `var` / `const`, so renamed constants like taar's
+    `IPV4_PARSE_FAIL` warn where they are read.
+  - **cyrius** issues 2026-11-04 and 2026-11-08 (agnos's epoll and
+    connect-deadline wrapper asks) each gain an "Also waiting: taar" section
+    naming taar's call sites.
+- **The roadmap's resolve-deadline item** points at those, and corrects "yo /
+  dig do not carry `chrono`": dig and whirl do, and only yo doesn't.
+
 ## [0.9.1] - 2026-11-09
 
 The public-surface review: the names 1.0 will freeze. The decisions and their

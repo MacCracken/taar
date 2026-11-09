@@ -72,10 +72,14 @@ deadline that waits on a clock, and two low-value or trigger-gated items.
   TCP retry of 16 reads × the timeout plus its connect, for each of up to three
   servers, for each of `attempts` rounds. The common cases are short (a dead
   server fails in milliseconds, a silent one at one timeout); the bound is the
-  long tail. One deadline per resolve needs a
-  monotonic clock, which only `chrono` provides on Linux — and `yo` / `dig` do
-  not carry it, so taar cannot depend on it (CLAUDE.md). *Waits on:* a clock in
-  the `syscalls` leaf upstream, or every consumer carrying `chrono`.
+  long tail. One deadline per resolve needs a monotonic clock, and the only
+  portable one is `chrono`'s `clock_now_ns`. dig and whirl carry `chrono`; yo
+  does not, so taar may not depend on it yet (CLAUDE.md). *Waits on* whichever
+  lands first:
+  - yo adopting `chrono` (yo roadmap 0.8.x, "The monotonic clock from
+    `chrono`"), after which every consumer carries it;
+  - a clock in the `syscalls` leaf (cyrius issue
+    `2026-11-09-syscalls-has-no-monotonic-clock.md`).
 - **Detect oversize datagrams.** A UDP reply over 2 KB is cut silently (no
   `MSG_TRUNC`) and parsed as if whole. Memory-safe; compliant servers stay under
   512 bytes because taar sends no EDNS OPT. *Ready, low value.*
@@ -128,7 +132,10 @@ Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
   site from 0.9.1 and is gone at 1.0.0:
   `ipv4_parse` → `taar_ipv4_parse`, `ipv4_format_to_buf` →
   `taar_ipv4_format_to_buf`, `IPV4_PARSE_FAIL` → `TAAR_IPV4_PARSE_FAIL` (yo,
-  dig); `taar_sock_close` → `taar_tcp_close` (whirl, dig). dig can also drop its
+  dig); `taar_sock_close` → `taar_tcp_close` (whirl, dig). The constants cannot
+  warn, because cyrius has no `#deprecated` for a `var` (proposed:
+  `cyrius/docs/development/proposals/2026-11-09-deprecated-constants.md`), so
+  grep for them. dig can also drop its
   mirrored `TCP_EINPROGRESS` (-115) and `PLATFORM_ERR_TIMEOUT` (-11) for taar's
   `TAAR_ERR_TIMEOUT`, which a Linux connect timeout now returns.
 - **Bump to 0.9.1** — matters to all three. `yo` and `dig` parse user-typed

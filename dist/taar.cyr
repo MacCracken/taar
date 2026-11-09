@@ -37,7 +37,9 @@ include "lib/fmt.cyr"
 # refuse them; through 0.8.1 taar read them as decimal.
 
 var TAAR_IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
-# DEPRECATED (0.9.1, removed at 1.0.0 — ADR 0002): the pre-0.9.1 name.
+# DEPRECATED (0.9.1, removed at 1.0.0 — ADR 0002): the pre-0.9.1 name. Not
+# marked #deprecated: cyrius has no such mark for a var, and one written here
+# would attach to the next fn (cyrius issue 2026-11-09).
 var IPV4_PARSE_FAIL = 0 - 1;
 
 # Parse a dotted-quad into a packed u32. Returns the packed address on
@@ -178,6 +180,9 @@ var TAAR_ERR_INTR = 0 - 4;
 # DEPRECATED (0.9.1, removed at 1.0.0): the pre-0.9.1 spellings of the two
 # constants above. ADR 0001 names them as the error values a caller may test,
 # so the leading underscore — taar's mark for internal — was wrong.
+# Not marked #deprecated: cyrius 6.7.18 has no such mark for a var, and one
+# written here attaches to the next fn instead (cyrius issue
+# 2026-11-09-an-attribute-before-a-var-attaches-to-the-next-fn).
 var _TAAR_ERR_TIMEOUT = 0 - 11;
 var _TAAR_ERR_INTR = 0 - 4;
 
