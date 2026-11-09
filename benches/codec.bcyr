@@ -58,9 +58,9 @@ fn _b_canned_reply(buf, q, ql): i64 {
     return off;
 }
 
-fn _bench_ipv4_parse() { ipv4_parse("192.168.100.200"); return 0; }
-fn _bench_ipv4_format() { ipv4_format_to_buf(0xC0A864C8, _b_buf); return 0; }
-fn _bench_fill_sockaddr() { taar_fill_sockaddr(_b_buf, 0xC0A864C8, 53); return 0; }
+fn _bench_ipv4_parse() { taar_ipv4_parse("192.168.100.200"); return 0; }
+fn _bench_ipv4_format() { taar_ipv4_format_to_buf(0xC0A864C8, _b_buf); return 0; }
+fn _bench_fill_sockaddr() { _taar_fill_sockaddr(_b_buf, 0xC0A864C8, 53); return 0; }
 fn _bench_encode_name() { _taar_dns_encode_name("www.example.com", _b_buf); return 0; }
 fn _bench_build_query() { _taar_dns_build_query(_b_q, 0x1234, "www.example.com"); return 0; }
 fn _bench_reply_ok() { _taar_dns_reply_ok(_b_q, _b_ql, _b_r, _b_rl, 0x1234); return 0; }
@@ -86,11 +86,11 @@ fn main() {
     _b_rcl = _b_rcl + _b_put(_b_rc + _b_rcl, "nameserver 192.168.1.1\nnameserver 1.1.1.1\n");
 
     println("=== taar codec benchmarks ===");
-    var b = bench_new("ipv4_parse");
+    var b = bench_new("taar_ipv4_parse");
     bench_run(b, &_bench_ipv4_parse, BENCH_ITERS); bench_report(b);
-    b = bench_new("ipv4_format_to_buf");
+    b = bench_new("taar_ipv4_format_to_buf");
     bench_run(b, &_bench_ipv4_format, BENCH_ITERS); bench_report(b);
-    b = bench_new("taar_fill_sockaddr");
+    b = bench_new("_taar_fill_sockaddr");
     bench_run(b, &_bench_fill_sockaddr, BENCH_ITERS); bench_report(b);
     b = bench_new("dns_encode_name");
     bench_run(b, &_bench_encode_name, BENCH_ITERS); bench_report(b);

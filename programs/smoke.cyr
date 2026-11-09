@@ -7,15 +7,15 @@
 
 include "src/main.cyr"
 
-# Round-trip a known address through ipv4_parse -> ipv4_format_to_buf.
+# Round-trip a known address through taar_ipv4_parse -> taar_ipv4_format_to_buf.
 # Returns 0 on success, 1 on either half mismatching.
 fn main() {
     alloc_init();
     # Round-trip a known address through parse → format.
-    var packed = ipv4_parse("192.168.1.1");
+    var packed = taar_ipv4_parse("192.168.1.1");
     if (packed != 0xC0A80101) { println("taar smoke FAIL: parse"); return 1; }
     var buf = alloc(16);
-    var n = ipv4_format_to_buf(packed, buf);
+    var n = taar_ipv4_format_to_buf(packed, buf);
     store8(buf + n, 0);
     if (streq(buf, "192.168.1.1") == 0) { println("taar smoke FAIL: format"); return 1; }
     println("taar smoke ok");

@@ -57,7 +57,10 @@ address codecs, socket I/O, packet construction, and DNS.
   aarch64 call, e.g. `sendto` 44 vs `fstatfs`) fail silently at runtime from a
   perfectly clean build. Where no wrapper exists, restructure to a call that has
   one rather than hardcoding.
-- **A receive deadline expiry is `_TAAR_ERR_TIMEOUT`, never `0`.** `0` means
+- **Public names carry `taar_` (functions) or `TAAR_` (constants); a leading
+  underscore is internal** (ADR 0002). A rename keeps the old name as a
+  `#deprecated("…")` alias until the next major release removes it.
+- **A receive deadline expiry is `TAAR_ERR_TIMEOUT`, never `0`.** `0` means
   the peer closed, and nothing else, on every backend. Collapsing the two is
   what let a stalled peer look like a finished response.
 - **Every public fn carries a doc comment** — `cyrius doc --check` is a CI gate

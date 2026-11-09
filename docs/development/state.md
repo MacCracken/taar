@@ -8,10 +8,10 @@
 
 ## Version
 
-**0.9.0** — 2026-11-09. Last P(-1) review (0.6.2):
+**0.9.1** — 2026-11-09. Last P(-1) review (0.6.2):
 [`docs/audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
 
-`dist/taar.cyr` is 1599 lines (`wc -l`; `cyrius distlib` reports 1582, excluding
+`dist/taar.cyr` is 1635 lines (`wc -l`; `cyrius distlib` reports 1618, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
 same bundle).
 
@@ -42,13 +42,17 @@ same bundle).
 
 | Module | Surface | Since |
 |--------|---------|-------|
-| `ipv4` | `ipv4_parse`, `ipv4_format_to_buf` | 0.1.0; leading zeros refused 0.8.2 |
-| `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0; TCP timeout bounds connect + send, AGNOS reply-source filter 0.6.2; AGNOS executed, send deadline + no-connection errors 0.7.0; per-socket AGNOS state, fd validation 0.7.1; Linux send without SIGPIPE 0.9.0 |
+| `ipv4` | `taar_ipv4_parse`, `taar_ipv4_format_to_buf`, `TAAR_IPV4_PARSE_FAIL` | 0.1.0; leading zeros refused 0.8.2; `taar_` names 0.9.1 |
+| `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms/close`, `TAAR_ERR_TIMEOUT`, `TAAR_ERR_INTR` | 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0; TCP timeout bounds connect + send, AGNOS reply-source filter 0.6.2; AGNOS executed, send deadline + no-connection errors 0.7.0; per-socket AGNOS state, fd validation 0.7.1; Linux send without SIGPIPE 0.9.0; `taar_tcp_close`, public error constants, Linux connect timeout = `TAAR_ERR_TIMEOUT` 0.9.1 |
 | `dns` | `taar_resolve_ipv4` — resolver discovery, RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC | 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0; fail-closed resolver choice 0.6.2; nameserver failover, `options timeout:` / `attempts:`, EINTR retry 0.8.0; answer owner-name + CNAME-chain validation, OPCODE check 0.8.1; 127.0.0.1 fallback on Linux, case-insensitive question echo 0.8.2 |
 
 Planned modules and their triggers live in [`roadmap.md`](roadmap.md). What
 every public call promises on both targets, and where they still differ, is
-[ADR 0001](../adr/0001-one-socket-and-resolver-contract.md).
+[ADR 0001](../adr/0001-one-socket-and-resolver-contract.md); the names are
+[ADR 0002](../adr/0002-the-public-surface-for-1-0.md)'s. The pre-0.9.1 names —
+`ipv4_parse`, `ipv4_format_to_buf`, `IPV4_PARSE_FAIL`, `taar_sock_close`,
+`taar_fill_sockaddr`, `_TAAR_ERR_TIMEOUT`, `_TAAR_ERR_INTR` — still work as
+deprecated aliases (the functions warn at each call site) until 1.0.0.
 
 **`src/socket.cyr` is the only module with per-target arms** — one
 `#ifdef CYRIUS_TARGET_AGNOS` split, resolved at the *consumer's* compile
@@ -80,9 +84,9 @@ What is actually gated, and what is not.
   `programs/`, `tests/` (including `tests/agnos/`) and `benches/`. Lint and doc
   coverage are hard gates in the `build` job over the same files; `audit` alone
   only reports them.
-- **x86_64**: smoke round-trip; unit suite **210 passed / 0 failed** (24
+- **x86_64**: smoke round-trip; unit suite **221 passed / 0 failed** (26
   groups).
-- **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 210
+- **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 221
   passed / 0 failed. This leg exists because the 0.3.3 `sendto` defect built
   clean and only failed at runtime.
 - **Integration, Linux** (`tests/integration/tc_fallback.sh`): seven cases —

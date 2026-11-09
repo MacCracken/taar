@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.9.0.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.9.1.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -21,7 +21,7 @@ All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
 
 | Module | Surface | Status |
 |--------|---------|--------|
-| `ipv4` | `ipv4_parse` (strict dotted-quad → packed u32), `ipv4_format_to_buf` | **shipped** |
+| `ipv4` | `taar_ipv4_parse` (strict dotted-quad → packed u32), `taar_ipv4_format_to_buf` | **shipped** |
 | `socket` | raw-syscall UDP **and TCP** primitives (`taar_udp_*` / `taar_tcp_*`), Linux + AGNOS backends | **shipped** |
 | `dns` | `taar_resolve_ipv4` — resolver discovery + RFC 1035 A-record query/parse over UDP-53, retried over TCP-53 when a reply is truncated | **shipped** |
 | `icmp` | echo packet build + checksum | planned |
@@ -59,7 +59,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.9.0"
+tag = "0.9.1"
 modules = ["dist/taar.cyr"]
 ```
 
@@ -81,7 +81,7 @@ Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.7.18`); run
 
 ```sh
 cyrius audit                                        # fmt + lint + docs + tests + bench
-cyrius test tests/                                  # tests/taar.tcyr — 210 assertions
+cyrius test tests/                                  # tests/taar.tcyr — 221 assertions
 cyrius test --aarch64 tests/                        # same suite on aarch64 (needs qemu-user)
 cyrius bench benches/                               # codec / parser timings
 cyrius build programs/smoke.cyr build/taar-smoke    # compiles + round-trips an address

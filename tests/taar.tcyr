@@ -13,34 +13,34 @@ include "src/dns.cyr"
 
 # === IPv4 parser ===
 fn test_ipv4_parse() {
-    test_group("ipv4_parse");
+    test_group("taar_ipv4_parse");
     # Valid.
-    assert_eq(ipv4_parse("0.0.0.0"),         0x00000000, "ipv4 zeros");
-    assert_eq(ipv4_parse("127.0.0.1"),       0x7F000001, "ipv4 loopback");
-    assert_eq(ipv4_parse("8.8.8.8"),         0x08080808, "ipv4 google");
-    assert_eq(ipv4_parse("192.168.1.1"),     0xC0A80101, "ipv4 gateway");
-    assert_eq(ipv4_parse("255.255.255.255"), 0xFFFFFFFF, "ipv4 broadcast");
-    assert_eq(ipv4_parse("10.0.2.15"),       0x0A00020F, "ipv4 slirp guest");
+    assert_eq(taar_ipv4_parse("0.0.0.0"),         0x00000000, "ipv4 zeros");
+    assert_eq(taar_ipv4_parse("127.0.0.1"),       0x7F000001, "ipv4 loopback");
+    assert_eq(taar_ipv4_parse("8.8.8.8"),         0x08080808, "ipv4 google");
+    assert_eq(taar_ipv4_parse("192.168.1.1"),     0xC0A80101, "ipv4 gateway");
+    assert_eq(taar_ipv4_parse("255.255.255.255"), 0xFFFFFFFF, "ipv4 broadcast");
+    assert_eq(taar_ipv4_parse("10.0.2.15"),       0x0A00020F, "ipv4 slirp guest");
     # Rejection cases.
-    assert_eq(ipv4_parse("256.0.0.0"),  IPV4_PARSE_FAIL, "ipv4 octet > 255");
-    assert_eq(ipv4_parse("1.2.3"),      IPV4_PARSE_FAIL, "ipv4 only 3 octets");
-    assert_eq(ipv4_parse("1.2.3.4.5"),  IPV4_PARSE_FAIL, "ipv4 5 octets");
-    assert_eq(ipv4_parse("1.2..4"),     IPV4_PARSE_FAIL, "ipv4 empty segment");
-    assert_eq(ipv4_parse(""),           IPV4_PARSE_FAIL, "ipv4 empty string");
-    assert_eq(ipv4_parse("1.2.3.4 "),   IPV4_PARSE_FAIL, "ipv4 trailing space");
-    assert_eq(ipv4_parse("1234.0.0.0"), IPV4_PARSE_FAIL, "ipv4 4-digit octet");
-    assert_eq(ipv4_parse("1.2.3.4\n"),  IPV4_PARSE_FAIL, "ipv4 trailing newline");
-    assert_eq(ipv4_parse("0x7f.0.0.1"), IPV4_PARSE_FAIL, "ipv4 hex rejected");
-    assert_eq(ipv4_parse(".1.2.3"),     IPV4_PARSE_FAIL, "ipv4 leading dot");
-    assert_eq(ipv4_parse("1.2.3.4."),   IPV4_PARSE_FAIL, "ipv4 trailing dot");
+    assert_eq(taar_ipv4_parse("256.0.0.0"),  TAAR_IPV4_PARSE_FAIL, "ipv4 octet > 255");
+    assert_eq(taar_ipv4_parse("1.2.3"),      TAAR_IPV4_PARSE_FAIL, "ipv4 only 3 octets");
+    assert_eq(taar_ipv4_parse("1.2.3.4.5"),  TAAR_IPV4_PARSE_FAIL, "ipv4 5 octets");
+    assert_eq(taar_ipv4_parse("1.2..4"),     TAAR_IPV4_PARSE_FAIL, "ipv4 empty segment");
+    assert_eq(taar_ipv4_parse(""),           TAAR_IPV4_PARSE_FAIL, "ipv4 empty string");
+    assert_eq(taar_ipv4_parse("1.2.3.4 "),   TAAR_IPV4_PARSE_FAIL, "ipv4 trailing space");
+    assert_eq(taar_ipv4_parse("1234.0.0.0"), TAAR_IPV4_PARSE_FAIL, "ipv4 4-digit octet");
+    assert_eq(taar_ipv4_parse("1.2.3.4\n"),  TAAR_IPV4_PARSE_FAIL, "ipv4 trailing newline");
+    assert_eq(taar_ipv4_parse("0x7f.0.0.1"), TAAR_IPV4_PARSE_FAIL, "ipv4 hex rejected");
+    assert_eq(taar_ipv4_parse(".1.2.3"),     TAAR_IPV4_PARSE_FAIL, "ipv4 leading dot");
+    assert_eq(taar_ipv4_parse("1.2.3.4."),   TAAR_IPV4_PARSE_FAIL, "ipv4 trailing dot");
     # Leading zeros are refused (0.8.2): inet_aton(3) reads "010" as octal 8
     # and a decimal reader as 10, so the string is ambiguous. A lone "0" is an
     # octet; any longer octet may not start with one.
-    assert_eq(ipv4_parse("010.1.1.1"),  IPV4_PARSE_FAIL, "ipv4 leading zero refused");
-    assert_eq(ipv4_parse("1.2.3.04"),   IPV4_PARSE_FAIL, "... in any octet");
-    assert_eq(ipv4_parse("00.0.0.0"),   IPV4_PARSE_FAIL, "ipv4 double zero refused");
-    assert_eq(ipv4_parse("0.0.0.0"),    0x00000000, "a lone 0 is an octet");
-    assert_eq(ipv4_parse("10.0.100.200"), 0x0A0064C8, "zeros after the first digit are fine");
+    assert_eq(taar_ipv4_parse("010.1.1.1"),  TAAR_IPV4_PARSE_FAIL, "ipv4 leading zero refused");
+    assert_eq(taar_ipv4_parse("1.2.3.04"),   TAAR_IPV4_PARSE_FAIL, "... in any octet");
+    assert_eq(taar_ipv4_parse("00.0.0.0"),   TAAR_IPV4_PARSE_FAIL, "ipv4 double zero refused");
+    assert_eq(taar_ipv4_parse("0.0.0.0"),    0x00000000, "a lone 0 is an octet");
+    assert_eq(taar_ipv4_parse("10.0.100.200"), 0x0A0064C8, "zeros after the first digit are fine");
     return 0;
 }
 
@@ -48,19 +48,19 @@ fn test_ipv4_parse() {
 fn test_ipv4_format() {
     test_group("ipv4_format");
     var b = alloc(16);
-    var n = ipv4_format_to_buf(0x7F000001, b);
+    var n = taar_ipv4_format_to_buf(0x7F000001, b);
     store8(b + n, 0);
     assert_eq(streq(b, "127.0.0.1"), 1, "ipv4 format loopback");
-    n = ipv4_format_to_buf(0xFFFFFFFF, b);
+    n = taar_ipv4_format_to_buf(0xFFFFFFFF, b);
     store8(b + n, 0);
     assert_eq(streq(b, "255.255.255.255"), 1, "ipv4 format broadcast");
-    n = ipv4_format_to_buf(0xC0A80101, b);
+    n = taar_ipv4_format_to_buf(0xC0A80101, b);
     store8(b + n, 0);
     assert_eq(streq(b, "192.168.1.1"), 1, "ipv4 format gateway");
     # Round-trip: parse(format(x)) == x.
-    n = ipv4_format_to_buf(0x08080808, b);
+    n = taar_ipv4_format_to_buf(0x08080808, b);
     store8(b + n, 0);
-    assert_eq(ipv4_parse(b), 0x08080808, "ipv4 round-trip 8.8.8.8");
+    assert_eq(taar_ipv4_parse(b), 0x08080808, "ipv4 round-trip 8.8.8.8");
     return 0;
 }
 
@@ -68,7 +68,7 @@ fn test_ipv4_format() {
 fn test_sockaddr() {
     test_group("sockaddr");
     var sa = alloc(16);
-    taar_fill_sockaddr(sa, 0xC0A80101, 53);   # 192.168.1.1 : 53
+    _taar_fill_sockaddr(sa, 0xC0A80101, 53);   # 192.168.1.1 : 53
     assert_eq(load8(sa + 0), 2,   "AF_INET low byte");
     assert_eq(load8(sa + 1), 0,   "AF_INET high byte");
     assert_eq(load8(sa + 2), 0,   "port hi (53>>8)");
@@ -78,7 +78,7 @@ fn test_sockaddr() {
     assert_eq(load8(sa + 6), 1,   "addr octet 2");
     assert_eq(load8(sa + 7), 1,   "addr octet 3");
     # a port spanning both bytes: 443 = 0x01BB
-    taar_fill_sockaddr(sa, 0x08080808, 443);
+    _taar_fill_sockaddr(sa, 0x08080808, 443);
     assert_eq(load8(sa + 2), 1,   "port hi (443>>8 = 1)");
     assert_eq(load8(sa + 3), 187, "port lo (443 & 0xFF = 187)");
     return 0;
@@ -330,7 +330,7 @@ fn test_dns_reply_ok() {
 # response. The Linux arm always got this right; the assertion pins both.
 fn test_socket_recv_contract() {
     test_group("socket-recv-contract");
-    assert_eq(_TAAR_ERR_TIMEOUT, 0 - 11, "timeout constant is -EAGAIN");
+    assert_eq(TAAR_ERR_TIMEOUT, 0 - 11, "timeout constant is -EAGAIN");
 
     var fds[16];
     store64(&fds, 0);
@@ -342,7 +342,7 @@ fn test_socket_recv_contract() {
 
     taar_tcp_set_timeout_ms(a, 200);
     var n = taar_tcp_recv(a, &buf, 8);            # nothing was ever written
-    assert_eq(n, _TAAR_ERR_TIMEOUT, "deadline expiry returns _TAAR_ERR_TIMEOUT");
+    assert_eq(n, TAAR_ERR_TIMEOUT, "deadline expiry returns TAAR_ERR_TIMEOUT");
 
     sys_close(b);                                  # now a genuine clean close
     var m = taar_tcp_recv(a, &buf, 8);
@@ -777,6 +777,57 @@ fn test_dns_name_eq() {
     return 0;
 }
 
+# === socket: a connect that hits its deadline says so (0.9.1) ===
+# A loopback listener with a zero-length accept queue, filled by one
+# connection of our own: Linux drops further SYNs, so the next connect waits
+# out its SO_SNDTIMEO. connect(2) reports that as -EINPROGRESS; taar as
+# TAAR_ERR_TIMEOUT, the value ADR 0001 lets a caller test.
+fn test_tcp_connect_timeout() {
+    test_group("tcp-connect-timeout");
+    var lo = 0x7F000001;
+    var l = sys_socket(2, 1, 6);
+    var sa[16];
+    _taar_fill_sockaddr(&sa, lo, 0);
+    assert_eq(sys_bind(l, &sa, 16), 0, "listener bound to an ephemeral port");
+    assert_eq(sys_listen(l, 0), 0, "zero-length accept queue");
+    var len[8];
+    store64(&len, 16);
+    sys_getsockname(l, &sa, &len);
+    var port = (load8(&sa + 2) << 8) | load8(&sa + 3);
+    var filler = taar_tcp_open();
+    assert_eq(taar_tcp_connect(filler, lo, port), 0, "one connection fills the queue");
+    var fd = taar_tcp_open();
+    taar_tcp_set_timeout_ms(fd, 300);
+    assert_eq(taar_tcp_connect(fd, lo, port), TAAR_ERR_TIMEOUT, "a connect past its deadline is TAAR_ERR_TIMEOUT");
+    taar_tcp_close(fd);
+    taar_tcp_close(filler);
+    sys_close(l);
+    return 0;
+}
+
+# === the deprecated names (0.9.1) still answer as the new ones ===
+# These calls make the build print "is deprecated" warnings on purpose: the
+# aliases are shipped behaviour until 1.0.0, so they are tested until then.
+fn test_deprecated_names() {
+    test_group("deprecated-names");
+    assert_eq(ipv4_parse("10.1.2.3"), taar_ipv4_parse("10.1.2.3"), "ipv4_parse is taar_ipv4_parse");
+    var a = alloc(16);
+    var b = alloc(16);
+    assert_eq(ipv4_format_to_buf(0x0A010203, a), taar_ipv4_format_to_buf(0x0A010203, b),
+      "ipv4_format_to_buf is taar_ipv4_format_to_buf");
+    assert_eq(IPV4_PARSE_FAIL, TAAR_IPV4_PARSE_FAIL, "IPV4_PARSE_FAIL keeps its value");
+    assert_eq(_TAAR_ERR_TIMEOUT, TAAR_ERR_TIMEOUT, "_TAAR_ERR_TIMEOUT keeps its value");
+    assert_eq(_TAAR_ERR_INTR, TAAR_ERR_INTR, "_TAAR_ERR_INTR keeps its value");
+    var sa = alloc(16);
+    var sb = alloc(16);
+    taar_fill_sockaddr(sa, 0x0A010203, 53);
+    _taar_fill_sockaddr(sb, 0x0A010203, 53);
+    assert_eq(memeq(sa, sb, 16), 1, "taar_fill_sockaddr is the internal fill");
+    var fd = taar_tcp_open();
+    assert_eq(taar_sock_close(fd), 0, "taar_sock_close closes like taar_tcp_close");
+    return 0;
+}
+
 # === dns: the TCP read loop is bounded in passes, not just bytes ===
 #
 # SOCK_SEQPACKET keeps message boundaries, so each read returns one record —
@@ -836,7 +887,7 @@ fn test_socket_send_timeout() {
         if (n < 0) { break; }
         i = i + 1;
     }
-    assert_eq(n, _TAAR_ERR_TIMEOUT, "a send into a full buffer returns at the deadline");
+    assert_eq(n, TAAR_ERR_TIMEOUT, "a send into a full buffer returns at the deadline");
     sys_close(a);
     sys_close(c);
     # A send to a peer that has gone is an error, not a signal. Under write(2)
@@ -906,6 +957,8 @@ fn main() {
     test_dns_answer_class();
     test_dns_owner();
     test_dns_name_eq();
+    test_tcp_connect_timeout();
+    test_deprecated_names();
     test_dns_tcp_read_cap();
     test_socket_send_timeout();
     test_poll_deadline();

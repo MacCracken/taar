@@ -38,7 +38,7 @@ var _TAAR_DNS_RBUF_LEN      = 2048;
 # then give up. Defence in depth since 0.7.0, and untested for that reason: with
 # a deadline set (this path always sets one) neither backend returns 0 for a
 # non-empty send — Linux reports SO_SNDTIMEO as -EAGAIN, and AGNOS taar_tcp_send
-# now maps the kernel's 0 to _TAAR_ERR_TIMEOUT. Through 0.6.2 AGNOS did return
+# now maps the kernel's 0 to TAAR_ERR_TIMEOUT. Through 0.6.2 AGNOS did return
 # 0 (sock_send#48, after ~8 s without progress), and a cap of 64 let a stalled
 # peer hold the retry for ~8.5 min.
 var _TAAR_DNS_TCP_MAX_SPINS  = 1;
@@ -412,7 +412,7 @@ fn _taar_resolv_addr(buf, s, e): i64 {
     var k = 0;
     while (k < n) { store8(&tmp + k, load8(buf + s + k)); k = k + 1; }
     store8(&tmp + n, 0);
-    return ipv4_parse(&tmp);
+    return taar_ipv4_parse(&tmp);
 }
 
 # `buf[s, e)` as a decimal number, or -1 unless it is 1 to 6 digits.
@@ -628,7 +628,7 @@ fn _taar_dns_tcp_send_all(fd, buf, len): i64 {
 }
 
 # Read exactly `want` bytes. Returns how many were actually read — a short
-# return means the peer closed (0), the deadline expired (_TAAR_ERR_TIMEOUT),
+# return means the peer closed (0), the deadline expired (TAAR_ERR_TIMEOUT),
 # the read failed, or the peer needed more than _TAAR_DNS_TCP_MAX_READS reads;
 # the caller treats every one as a failed retry. Always terminates: at most
 # _TAAR_DNS_TCP_MAX_READS reads, each bounded by the socket's receive timeout.
@@ -639,7 +639,7 @@ fn _taar_dns_tcp_read_all(fd, buf, want): i64 {
         if (reads >= _TAAR_DNS_TCP_MAX_READS) { return off; }
         reads = reads + 1;
         var n = taar_tcp_recv(fd, buf + off, want - off);
-        if (n == _TAAR_ERR_INTR) { continue; }   # a signal; counted, so still bounded
+        if (n == TAAR_ERR_INTR) { continue; }   # a signal; counted, so still bounded
         if (n <= 0) { return off; }
         off = off + n;
     }
@@ -665,18 +665,18 @@ fn _taar_dns_query_tcp(ns, qbuf, qlen, rbuf, rmax, timeout_ms): i64 {
     # Fail closed: without its deadlines this socket's connect and reads could
     # block indefinitely. (No test can make setsockopt fail on a fresh socket,
     # so this guard is untested; it costs one compare.)
-    if (taar_tcp_set_timeout_ms(fd, timeout_ms) < 0) { taar_sock_close(fd); return 0 - 1; }
-    if (taar_tcp_connect(fd, ns, 53) < 0) { taar_sock_close(fd); return 0 - 1; }
-    if (_taar_dns_tcp_send_all(fd, &out, framed) < 0) { taar_sock_close(fd); return 0 - 1; }
+    if (taar_tcp_set_timeout_ms(fd, timeout_ms) < 0) { taar_tcp_close(fd); return 0 - 1; }
+    if (taar_tcp_connect(fd, ns, 53) < 0) { taar_tcp_close(fd); return 0 - 1; }
+    if (_taar_dns_tcp_send_all(fd, &out, framed) < 0) { taar_tcp_close(fd); return 0 - 1; }
 
     var lb[2];
-    if (_taar_dns_tcp_read_all(fd, &lb, 2) != 2) { taar_sock_close(fd); return 0 - 1; }
+    if (_taar_dns_tcp_read_all(fd, &lb, 2) != 2) { taar_tcp_close(fd); return 0 - 1; }
     var mlen = (load8(&lb) << 8) | load8(&lb + 1);
-    if (mlen < _TAAR_DNS_HEADER_LEN) { taar_sock_close(fd); return 0 - 1; }
-    if (mlen > rmax) { taar_sock_close(fd); return 0 - 1; }
+    if (mlen < _TAAR_DNS_HEADER_LEN) { taar_tcp_close(fd); return 0 - 1; }
+    if (mlen > rmax) { taar_tcp_close(fd); return 0 - 1; }
 
     var got = _taar_dns_tcp_read_all(fd, rbuf, mlen);
-    taar_sock_close(fd);
+    taar_tcp_close(fd);
     if (got != mlen) { return 0 - 1; }
     return mlen;
 }
@@ -717,7 +717,7 @@ fn _taar_dns_reply_ok(qbuf, qlen, buf, len, id): i64 {
 # kernel, because taar_udp_send connects the socket, and on AGNOS by
 # taar_udp_recv itself. Non-matching datagrams are skipped and the wait
 # resumes, up to _TAAR_DNS_MAX_REPLIES — a receive a signal interrupted
-# (_TAAR_ERR_INTR: Linux does not restart a recv with SO_RCVTIMEO set) counts
+# (TAAR_ERR_INTR: Linux does not restart a recv with SO_RCVTIMEO set) counts
 # as one of them, so a signal no longer ends the resolve.
 #
 # Tradeoff: the worst-case wait per server becomes _TAAR_DNS_MAX_REPLIES × the
@@ -750,7 +750,7 @@ fn _taar_dns_ask(ns, qbuf, qlen, timeout_ms): i64 {
     while (tries < _TAAR_DNS_MAX_REPLIES) {
         tries = tries + 1;
         var n = taar_udp_recv(fd, &rbuf, _TAAR_DNS_RBUF_LEN);
-        if (n == _TAAR_ERR_INTR) { continue; }
+        if (n == TAAR_ERR_INTR) { continue; }
         if (n < 0) { break; }                                          # timeout / error
         if (_taar_dns_reply_ok(qbuf, qlen, &rbuf, n, id) != 1) { continue; }
         rn = n;
@@ -803,7 +803,7 @@ fn _taar_dns_ask(ns, qbuf, qlen, timeout_ms): i64 {
 fn taar_resolve_ipv4(host): i64 {
     if (host == 0) { return 0 - 1; }
     if (load8(host) == 0) { return 0 - 1; }
-    var lit = ipv4_parse(host);
+    var lit = taar_ipv4_parse(host);
     if (lit >= 0) { return lit; }
 
     var cfg[48];

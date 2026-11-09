@@ -25,13 +25,15 @@
 # glibc's inet_pton, Go (1.17) and Python (3.9.5, CVE-2021-29921) all
 # refuse them; through 0.8.1 taar read them as decimal.
 
-var IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
+var TAAR_IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
+# DEPRECATED (0.9.1, removed at 1.0.0 — ADR 0002): the pre-0.9.1 name.
+var IPV4_PARSE_FAIL = 0 - 1;
 
 # Parse a dotted-quad into a packed u32. Returns the packed address on
-# success, IPV4_PARSE_FAIL on any rejection. Caller checks `result < 0`
+# success, TAAR_IPV4_PARSE_FAIL on any rejection. Caller checks `result < 0`
 # to detect failure.
-fn ipv4_parse(s): i64 {
-    if (s == 0) { return IPV4_PARSE_FAIL; }
+fn taar_ipv4_parse(s): i64 {
+    if (s == 0) { return TAAR_IPV4_PARSE_FAIL; }
     var i = 0;
     var packed = 0;
     var seg = 0;
@@ -43,22 +45,22 @@ fn ipv4_parse(s): i64 {
         while (c >= 48) {
             if (c > 57) { break; }
             oct = oct * 10 + (c - 48);
-            if (oct > 255) { return IPV4_PARSE_FAIL; }
+            if (oct > 255) { return TAAR_IPV4_PARSE_FAIL; }
             digits = digits + 1;
-            if (digits > 3) { return IPV4_PARSE_FAIL; }
+            if (digits > 3) { return TAAR_IPV4_PARSE_FAIL; }
             i = i + 1;
             c = load8(s + i);
         }
-        if (digits == 0) { return IPV4_PARSE_FAIL; }
+        if (digits == 0) { return TAAR_IPV4_PARSE_FAIL; }
         if (digits > 1) {
-            if (lead == 48) { return IPV4_PARSE_FAIL; }    # a leading '0'
+            if (lead == 48) { return TAAR_IPV4_PARSE_FAIL; }    # a leading '0'
         }
         packed = (packed << 8) | oct;
         if (seg < 3) {
-            if (c != 46) { return IPV4_PARSE_FAIL; }   # '.' = 46
+            if (c != 46) { return TAAR_IPV4_PARSE_FAIL; }   # '.' = 46
             i = i + 1;
         } else {
-            if (c != 0) { return IPV4_PARSE_FAIL; }    # must terminate after 4th octet
+            if (c != 0) { return TAAR_IPV4_PARSE_FAIL; }    # must terminate after 4th octet
         }
         seg = seg + 1;
     }
@@ -68,7 +70,7 @@ fn ipv4_parse(s): i64 {
 # Format a packed v4 as dotted-quad into buf. Buf must hold at least
 # 16 bytes (worst case "255.255.255.255\0" = 16). Returns bytes
 # written (without a trailing NUL).
-fn ipv4_format_to_buf(packed_addr, buf): i64 {
+fn taar_ipv4_format_to_buf(packed_addr, buf): i64 {
     var pos = 0;
     pos = pos + fmt_int_buf((packed_addr >> 24) & 0xFF, buf + pos);
     store8(buf + pos, 46); pos = pos + 1;
@@ -79,3 +81,15 @@ fn ipv4_format_to_buf(packed_addr, buf): i64 {
     pos = pos + fmt_int_buf(packed_addr & 0xFF, buf + pos);
     return pos;
 }
+
+# --- deprecated names (0.9.1; removed at 1.0.0 — ADR 0002) ---
+# The codec kept the names yo and dig shipped before the extraction; 0.9.1
+# brings it under the taar_ prefix every other public name carries.
+
+# DEPRECATED (0.9.1): use taar_ipv4_parse.
+#deprecated("use taar_ipv4_parse; ipv4_parse is removed at taar 1.0.0")
+fn ipv4_parse(s): i64 { return taar_ipv4_parse(s); }
+
+# DEPRECATED (0.9.1): use taar_ipv4_format_to_buf.
+#deprecated("use taar_ipv4_format_to_buf; ipv4_format_to_buf is removed at taar 1.0.0")
+fn ipv4_format_to_buf(packed_addr, buf): i64 { return taar_ipv4_format_to_buf(packed_addr, buf); }

@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-09
+
+The public-surface review: the names 1.0 will freeze. The decisions and their
+reasoning are
+[ADR 0002](docs/adr/0002-the-public-surface-for-1-0.md). ADR 0001's tables now
+use the new names.
+
+### Changed
+
+- **Every public name carries `taar_` / `TAAR_`.** Each old name keeps working
+  until **1.0.0**, which removes it:
+
+  | Was | Is |
+  |---|---|
+  | `_TAAR_ERR_TIMEOUT`, `_TAAR_ERR_INTR` | `TAAR_ERR_TIMEOUT`, `TAAR_ERR_INTR` |
+  | `ipv4_parse`, `ipv4_format_to_buf` | `taar_ipv4_parse`, `taar_ipv4_format_to_buf` |
+  | `IPV4_PARSE_FAIL` | `TAAR_IPV4_PARSE_FAIL` |
+  | `taar_sock_close` | `taar_tcp_close` (matches `taar_udp_close`) |
+  | `taar_fill_sockaddr` | internal (`_taar_fill_sockaddr`): no consumer called it |
+
+  - **The error constants were the real defect.** ADR 0001 tells callers to
+    test them, but the leading underscore marked them internal, so dig
+    re-declared -11 rather than naming taar's.
+  - **Deprecated functions** carry `#deprecated("…")`, so cyrius warns at each
+    call site. `cyrius lint` does not warn, so a consumer's lint gate stays
+    green.
+  - **Deprecated constants** can't warn (cyrius has no marker for a `var`), so
+    they are deprecated in their doc comment only.
+- **A Linux connect that misses its deadline returns `TAAR_ERR_TIMEOUT`.** It
+  used to pass through `connect(2)`'s -EINPROGRESS, which made dig re-declare
+  -115 to tell a timeout from a refusal. "Timed out" is now one value on every
+  receive, send and connect.
+  - **dig's outcome is unchanged:** -11 is the value it already treats as a
+    timeout.
+  - **AGNOS still answers -1:** its kernel doesn't say why a connect failed.
+
+### Tests
+
+- **Unit suite: 210 → 221.**
+  - **`tcp-connect-timeout`:** a loopback listener whose zero-length accept
+    queue is already full, and a connect to it that must end in
+    `TAAR_ERR_TIMEOUT`. Removing the map gives -115, so the test fails.
+  - **`deprecated-names`:** each alias answers as its new name. Its build
+    prints the expected deprecation warnings.
+- **Callers inside taar** (`src/`, `programs/`, `tests/`, `benches/`, the
+  AGNOS selftest) use the new names, so nothing else warns.
+- **The AGNOS harness passes all 87 checks** on the renamed arm.
+
+### Documentation
+
+- **ADR 0002** records the decisions and the alternatives rejected:
+  - keeping `ipv4_*` unprefixed;
+  - keeping the aliases through 1.x;
+  - documenting -EINPROGRESS;
+  - making the internals that tests use public.
+- **ADR conventions:** an accepted ADR's Decision tables may take a later ADR's
+  amendment, named on its status line.
+- **`CLAUDE.md`** gains the naming rule.
+- **The roadmap:**
+  - 0.9.x is done;
+  - 1.0.0 adds "deprecated aliases removed";
+  - the consumer-migration list gains the rename table;
+  - its stale note about dig is corrected. dig's DNS-over-TCP already runs on
+    `taar_tcp_*`, its UDP transport is the remaining fold, and its DNS layer
+    stays its own by design.
+
 ## [0.9.0] - 2026-11-09
 
 The backend contract, written down. Writing it found a Linux defect, fixed

@@ -21,7 +21,7 @@
 # module global (taar is single-connection-at-a-time, single-threaded).
 #
 # IPv4 addresses are packed first-octet-in-high-byte (0xC0A80101 = 192.168.1.1),
-# matching taar's ipv4_parse / ipv4_format_to_buf and the agnos kernel's ip4().
+# matching taar's taar_ipv4_parse / taar_ipv4_format_to_buf and the agnos kernel's ip4().
 #
 # SYSCALL NUMBERS COME FROM THE STDLIB, NEVER FROM LITERALS.
 #
@@ -54,26 +54,29 @@ var _TAAR_SOL_SOCKET  = 1;
 var _TAAR_SO_RCVTIMEO = 20;   # asm-generic, so x86_64 and aarch64 agree
 var _TAAR_SO_SNDTIMEO = 21;
 var _TAAR_MSG_NOSIGNAL = 0x4000;   # asm-generic, so x86_64 and aarch64 agree
+var _TAAR_EINPROGRESS  = 0 - 115;  # asm-generic errno, likewise
 
 # Receive-deadline expiry, returned by both recv paths on both backends.
 # -11 is Linux's -EAGAIN, which is literally what a SO_RCVTIMEO expiry yields
 # from read(2)/recvfrom(2) — so the AGNOS poll loops report a timeout using the
 # same value the kernel would, and callers need one check, not two.
-var _TAAR_ERR_TIMEOUT = 0 - 11;
+var TAAR_ERR_TIMEOUT = 0 - 11;
 # A receive a signal interrupted: Linux's -EINTR. With SO_RCVTIMEO set, Linux
 # never restarts recvfrom(2) / read(2) after a signal — not even after a bare
 # SIGSTOP / SIGCONT with no handler — so a caller that wants to keep waiting
 # has to check for it. The AGNOS arm never returns it (its waits are polls).
+var TAAR_ERR_INTR = 0 - 4;
+# DEPRECATED (0.9.1, removed at 1.0.0): the pre-0.9.1 spellings of the two
+# constants above. ADR 0001 names them as the error values a caller may test,
+# so the leading underscore — taar's mark for internal — was wrong.
+var _TAAR_ERR_TIMEOUT = 0 - 11;
 var _TAAR_ERR_INTR = 0 - 4;
 
 # Fill a caller-provided 16-byte buffer as a sockaddr_in for `packed_addr`
-# (first-octet-high-byte) + `port` (written network byte order).
-#
-# Defined outside both #ifdef arms: it is pure byte packing with no syscall,
-# and the module contract promises an identical taar_* surface on every
-# target. It previously lived inside the Linux arm only, so an AGNOS-target
-# consumer calling it failed to link.
-fn taar_fill_sockaddr(sa, packed_addr, port): i64 {
+# (first-octet-high-byte) + `port` (written network byte order). Internal since
+# 0.9.1: only the Linux arm builds a sockaddr, and no consumer called it.
+# Defined outside both #ifdef arms because it is pure byte packing.
+fn _taar_fill_sockaddr(sa, packed_addr, port): i64 {
     var i = 0;
     while (i < 16) { store8(sa + i, 0); i = i + 1; }
     store8(sa, _TAAR_AF_INET);            # AF_INET low byte (2); high byte stays 0
@@ -154,7 +157,7 @@ fn _taar_set_sock_timeout(fd, optname, timeout_ms): i64 {
 }
 
 # Bound how long a single taar_udp_recv will block, via SO_RCVTIMEO. An expiry
-# then surfaces as _TAAR_ERR_TIMEOUT. 0 means block indefinitely. Returns 0, or
+# then surfaces as TAAR_ERR_TIMEOUT. 0 means block indefinitely. Returns 0, or
 # a negative errno.
 fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
     return _taar_set_sock_timeout(fd, _TAAR_SO_RCVTIMEO, timeout_ms);
@@ -175,7 +178,7 @@ fn taar_udp_set_timeout_ms(fd, timeout_ms): i64 {
 # connect keeps the (fd, addr, port) signature intact. Bytes sent, or <0.
 fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
     var sa[16];
-    taar_fill_sockaddr(&sa, packed_addr, port);
+    _taar_fill_sockaddr(&sa, packed_addr, port);
     var c = sys_connect(fd, &sa, 16);
     if (c < 0) { return c; }
     return sys_write(fd, pkt, pkt_len);
@@ -183,13 +186,13 @@ fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
 
 # Receive one datagram. Because taar_udp_send connects the socket, the kernel
 # has already dropped anything not from that peer. Returns bytes received (>0),
-# or a negative errno — _TAAR_ERR_TIMEOUT if the receive deadline expired.
+# or a negative errno — TAAR_ERR_TIMEOUT if the receive deadline expired.
 # A datagram longer than maxlen is truncated to it.
 fn taar_udp_recv(fd, buf, maxlen): i64 {
     return sys_recvfrom(fd, buf, maxlen, 0, 0, 0);
 }
 
-# Release a UDP socket. Split from taar_sock_close because AGNOS unbinds a
+# Release a UDP socket. Split from taar_tcp_close because AGNOS unbinds a
 # listener rather than closing a connection.
 fn taar_udp_close(fd): i64 {
     return sys_close(fd);
@@ -198,7 +201,7 @@ fn taar_udp_close(fd): i64 {
 # --- TCP ---
 
 # Open a TCP socket. Returns the fd, or a negative errno. Pair with
-# taar_tcp_connect; release with taar_sock_close.
+# taar_tcp_connect; release with taar_tcp_close.
 fn taar_tcp_open(): i64 {
     return sys_socket(_TAAR_AF_INET, _TAAR_SOCK_STREAM, _TAAR_IPPROTO_TCP);
 }
@@ -207,10 +210,10 @@ fn taar_tcp_open(): i64 {
 # 0 means block indefinitely. Returns 0, or a negative errno. Call it before
 # taar_tcp_connect for the connect to be bounded.
 #
-#   - recv (SO_RCVTIMEO): an expiry is _TAAR_ERR_TIMEOUT, distinct from the 0
+#   - recv (SO_RCVTIMEO): an expiry is TAAR_ERR_TIMEOUT, distinct from the 0
 #     that means the peer closed.
 #   - send (SO_SNDTIMEO): a send that cannot write anything before the deadline
-#     is _TAAR_ERR_TIMEOUT; one that wrote some bytes returns that count.
+#     is TAAR_ERR_TIMEOUT; one that wrote some bytes returns that count.
 #   - connect (also SO_SNDTIMEO): a handshake that does not finish in time
 #     fails with -EINPROGRESS.
 #
@@ -225,15 +228,23 @@ fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
 }
 
 # Connect to packed_addr:port. Blocks until the handshake completes, fails, or
-# the kernel gives up. Returns 0 on success, or a negative errno.
+# the socket's timeout expires. Returns 0 on success, TAAR_ERR_TIMEOUT when the
+# deadline passed first, or another negative errno.
+#
+# connect(2) reports a SO_SNDTIMEO expiry as -EINPROGRESS. Through 0.9.0 that
+# value reached the caller, so one that wanted "timed out" had to know Linux's
+# errno for it (dig re-declared -115), against ADR 0001's rule that callers
+# test only taar's named errors.
 fn taar_tcp_connect(fd, packed_addr, port): i64 {
     var sa[16];
-    taar_fill_sockaddr(&sa, packed_addr, port);
-    return sys_connect(fd, &sa, 16);
+    _taar_fill_sockaddr(&sa, packed_addr, port);
+    var r = sys_connect(fd, &sa, 16);
+    if (r == _TAAR_EINPROGRESS) { return TAAR_ERR_TIMEOUT; }
+    return r;
 }
 
 # send(2) with MSG_NOSIGNAL. Returns bytes accepted, which may be < len on a
-# partial write — the caller loops — or a negative errno: _TAAR_ERR_TIMEOUT when
+# partial write — the caller loops — or a negative errno: TAAR_ERR_TIMEOUT when
 # SO_SNDTIMEO expires with nothing sent, -EPIPE when the peer has gone.
 #
 # Through 0.8.2 this was write(2), and a write to a peer that has gone raises
@@ -245,7 +256,7 @@ fn taar_tcp_send(fd, buf, len): i64 {
 }
 
 # Read from the stream. Returns bytes read (>0), 0 when the peer has closed
-# cleanly, or a negative errno — _TAAR_ERR_TIMEOUT if the receive deadline
+# cleanly, or a negative errno — TAAR_ERR_TIMEOUT if the receive deadline
 # expired. Distinguishing those last two is what lets a caller tell a finished
 # response from a stalled one; see the AGNOS peer, which now matches.
 fn taar_tcp_recv(fd, buf, maxlen): i64 {
@@ -253,7 +264,7 @@ fn taar_tcp_recv(fd, buf, maxlen): i64 {
 }
 
 # Release a TCP socket.
-fn taar_sock_close(fd): i64 {
+fn taar_tcp_close(fd): i64 {
     return sys_close(fd);
 }
 
@@ -432,7 +443,7 @@ fn taar_udp_send(fd, packed_addr, port, pkt, pkt_len): i64 {
 }
 
 # Non-blocking kernel recv polled against an uptime_ms deadline. Returns bytes
-# received (>0), _TAAR_ERR_TIMEOUT on deadline expiry (matching what Linux
+# received (>0), TAAR_ERR_TIMEOUT on deadline expiry (matching what Linux
 # SO_RCVTIMEO yields), or <0 (a kernel error, or an fd that is not an open taar
 # UDP socket). Polls at least once, so a reply already waiting is returned even
 # with a short deadline. A datagram from any host but the peer taar_udp_send
@@ -453,13 +464,13 @@ fn taar_udp_recv(fd, buf, maxlen): i64 {
             var pport = load64(&_taar_ag_udp_peer_port + s * 8);
             if (_taar_peer_match(&from, pip, pport) == 1) { return n; }
         }
-        if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return _TAAR_ERR_TIMEOUT; }
+        if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return TAAR_ERR_TIMEOUT; }
         sys_sleep_ms(5);
     }
-    return _TAAR_ERR_TIMEOUT;
+    return TAAR_ERR_TIMEOUT;
 }
 
-# Release the UDP listener (udp_unbind#54). Split from taar_sock_close, which
+# Release the UDP listener (udp_unbind#54). Split from taar_tcp_close, which
 # closes a TCP connection — on AGNOS these are different kernel objects.
 # Returns the kernel result, or -1 for an fd that is not an open taar UDP
 # socket: a listener bound some other way is not taar's to unbind.
@@ -492,7 +503,7 @@ fn taar_tcp_open(): i64 {
 # No setsockopt on AGNOS — remember this socket's deadline for recv (the poll
 # loop) and send (sock_send_dl#109). 0 = no deadline. Returns 0, or -1 for a
 # negative timeout or an fd that is not an open taar TCP socket. Expiry is
-# _TAAR_ERR_TIMEOUT for both, as on Linux. The connect is NOT bounded by it:
+# TAAR_ERR_TIMEOUT for both, as on Linux. The connect is NOT bounded by it:
 # sock_connect#47 carries its own ~8 s window (note 6).
 fn taar_tcp_set_timeout_ms(fd, timeout_ms): i64 {
     var s = _taar_ag_tcp_slot(fd);
@@ -548,7 +559,7 @@ fn _taar_ag_send_once(conn, buf, len, timeout_ms): i64 {
 }
 
 # Send up to `len` bytes. Returns bytes sent (> 0, possibly < len — the caller
-# loops), 0 for len <= 0, _TAAR_ERR_TIMEOUT when nothing could be sent before
+# loops), 0 for len <= 0, TAAR_ERR_TIMEOUT when nothing could be sent before
 # the socket's deadline (what SO_SNDTIMEO makes Linux write(2) return), or -1
 # for a bad fd, no connection, or a dead one. With no deadline set it waits for
 # progress, as a blocking Linux write(2) does.
@@ -573,14 +584,14 @@ fn taar_tcp_send(fd, buf, len): i64 {
     while (1) {
         var n = _taar_ag_send_once(conn, buf, len, tmo);
         if (n != 0) { return n; }
-        if (tmo > 0) { return _TAAR_ERR_TIMEOUT; }
+        if (tmo > 0) { return TAAR_ERR_TIMEOUT; }
     }
-    return _TAAR_ERR_TIMEOUT;
+    return TAAR_ERR_TIMEOUT;
 }
 
 # Poll sock_recv#49 (>0 data / 0 WOULD_BLOCK / -1 EOF) against the deadline,
 # mapping to the Linux blocking-read sense. Returns bytes read (>0), 0 when the
-# peer closed cleanly (or maxlen <= 0, as read(2) answers), _TAAR_ERR_TIMEOUT
+# peer closed cleanly (or maxlen <= 0, as read(2) answers), TAAR_ERR_TIMEOUT
 # on deadline expiry, or -1 for a bad fd or no connection (never connected, or
 # closed). Polls at least once.
 #
@@ -615,16 +626,16 @@ fn taar_tcp_recv(fd, buf, maxlen): i64 {
         var n = sys_sock_recv(conn, buf, maxlen);
         if (n > 0) { return n; }
         if (n < 0) { return 0; }        # -1 = EOF → "peer closed" (see ⚠ above)
-        if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return _TAAR_ERR_TIMEOUT; }
+        if (_taar_poll_expired(sys_uptime_ms(), deadline) == 1) { return TAAR_ERR_TIMEOUT; }
         sys_sleep_ms(2);                # 0 = WOULD_BLOCK → keep polling
     }
-    return _TAAR_ERR_TIMEOUT;
+    return TAAR_ERR_TIMEOUT;
 }
 
 # Close this socket's conn (sock_close#50), if it has one, and free its slot.
 # Returns the kernel result (0 when there was no conn to close), or -1 for an fd
 # that is not an open taar TCP socket — closing twice is an error, as on Linux.
-fn taar_sock_close(fd): i64 {
+fn taar_tcp_close(fd): i64 {
     var s = _taar_ag_tcp_slot(fd);
     if (s < 0) { return 0 - 1; }
     var r = 0;
@@ -669,3 +680,14 @@ fn _taar_plat_dns_server(): i64 { return sys_net_dns_server(); }
 # first, is the normal case.
 fn _taar_plat_dns_fallback(): i64 { return 0x08080808; }
 #endif
+
+# --- deprecated names (0.9.1; removed at 1.0.0 — ADR 0002) ---
+
+# DEPRECATED (0.9.1): use taar_tcp_close, which matches taar_udp_close.
+#deprecated("use taar_tcp_close; taar_sock_close is removed at taar 1.0.0")
+fn taar_sock_close(fd): i64 { return taar_tcp_close(fd); }
+
+# DEPRECATED (0.9.1): internal now. No consumer called it, and only taar's
+# Linux arm needs a sockaddr_in.
+#deprecated("internal since taar 0.9.1; taar_fill_sockaddr is removed at 1.0.0")
+fn taar_fill_sockaddr(sa, packed_addr, port): i64 { return _taar_fill_sockaddr(sa, packed_addr, port); }

@@ -89,13 +89,9 @@ deadline that waits on a clock, and two low-value or trigger-gated items.
 0.9.0 wrote the contract: [ADR 0001](../adr/0001-one-socket-and-resolver-contract.md).
 Its "where the targets differ" table is the 0.7.x list above, kept in step.
 
-- **Public-surface review.** Read ADR 0001's per-call table and settle names
-  before 1.0: whether the `taar_` prefix covers `ipv4_*` and `IPV4_PARSE_FAIL`
-  too, whether `taar_sock_close` becomes `taar_tcp_close` to match
-  `taar_udp_close`, and whether the internal `_taar_*` names a test or harness
-  reaches into should be public. Deprecate rather than remove, since three
-  consumers pin the bundle. *Ready* — 0.8.x is done, and the 0.7.x rows wait on
-  upstream changes that do not touch names.
+0.9.1 settled the names: [ADR 0002](../adr/0002-the-public-surface-for-1-0.md).
+Every public name carries `taar_` / `TAAR_`, and the old names are
+`#deprecated` aliases until 1.0.0 removes them. Nothing in 0.9.x is open.
 
 ## 1.0.0 — criteria
 
@@ -106,7 +102,10 @@ Its "where the targets differ" table is the 0.7.x list above, kept in step.
   (its 1.6x port); executed coverage follows that boot.
 - The 0.7.x parity items closed, or each written into the contract ADR as a
   documented target difference.
-- Frozen public surface + the contract ADR (0.9.x).
+- Frozen public surface + the contract ADR (0.9.x): done, ADRs 0001 and 0002.
+- **The deprecated aliases removed** (ADR 0002's table): the deprecated blocks
+  at the end of `src/ipv4.cyr` and `src/socket.cyr`, the `_TAAR_ERR_*` and
+  `IPV4_PARSE_FAIL` constants, and the `deprecated-names` test group.
 
 ## Backlog (v1, trigger-gated)
 
@@ -125,7 +124,14 @@ Grown only when the named trigger fires.
 
 Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
 
-- **Bump to 0.9.0** — matters to all three. `yo` and `dig` parse user-typed
+- **Rename for 0.9.1 / 1.0.0** (ADR 0002). Each old name warns at its call
+  site from 0.9.1 and is gone at 1.0.0:
+  `ipv4_parse` → `taar_ipv4_parse`, `ipv4_format_to_buf` →
+  `taar_ipv4_format_to_buf`, `IPV4_PARSE_FAIL` → `TAAR_IPV4_PARSE_FAIL` (yo,
+  dig); `taar_sock_close` → `taar_tcp_close` (whirl, dig). dig can also drop its
+  mirrored `TCP_EINPROGRESS` (-115) and `PLATFORM_ERR_TIMEOUT` (-11) for taar's
+  `TAAR_ERR_TIMEOUT`, which a Linux connect timeout now returns.
+- **Bump to 0.9.1** — matters to all three. `yo` and `dig` parse user-typed
   addresses (and dig its resolv.conf) with `ipv4_parse`, which since 0.8.2
   refuses a leading zero: `010.1.1.1` is no longer read as 10.1.1.1. Neither
   tool's tests rely on the old reading. And to `whirl`, the one consumer of
@@ -139,10 +145,11 @@ Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
   rather than 8.8.8.8, and a resolver that echoes the name in another case
   works (0.8.2). On Linux a send to a server that has gone no longer kills it
   with SIGPIPE (0.9.0).
-- **`dig` onto taar's `socket` and `dns`.** The `socket` fold trigger fired at
-  dig 0.3.7, when dig wrote its own connect-then-write UDP transport — the same
-  RFC 5452 reasoning as `taar_udp_send`, rediscovered. The fold runs the other
-  way from `ipv4`: taar's `socket` and `dns` were written independently on
-  whirl's pull, so dig would *migrate onto* them — a behavioural review, not a
-  dedup. Parked at dig's own 0.4.x.
+- **`dig`'s UDP transport onto `taar_udp_*`.** dig's DNS-over-TCP already runs
+  on `taar_tcp_*` (its `src/tcp.cyr`). Its connect-then-write UDP transport
+  still duplicates `taar_udp_send`'s RFC 5452 reasoning, and dig held it back
+  pending a review of taar's AGNOS UDP arm — which taar's harness has executed
+  since 0.7.0. dig's DNS layer stays its own by design: it needs any qtype and
+  the response bytes, which `taar_resolve_ipv4` deliberately does not give.
+  Consumer-repo work.
 - **`yo`'s `icmp.cyr`** — waits on the `icmp` backlog item.

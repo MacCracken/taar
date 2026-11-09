@@ -1,6 +1,6 @@
 # 0001 — One socket and resolver contract across the Linux and AGNOS backends
 
-**Status**: Accepted
+**Status**: Accepted — names amended by [0002](0002-the-public-surface-for-1-0.md) (0.9.1)
 **Date**: 2026-11-09
 
 ## Context
@@ -54,9 +54,9 @@ clause, and a change to the contract supersedes this ADR rather than editing it.
 
 - **Returns.** A count is `> 0`, and `0` has one stated meaning per call. Any
   negative value is an error, and a caller may test for only these:
-  - **`_TAAR_ERR_TIMEOUT` (-11):** a receive or send deadline expired, on both
-    targets.
-  - **`_TAAR_ERR_INTR` (-4):** a signal interrupted a receive. This happens on
+  - **`TAAR_ERR_TIMEOUT` (-11):** a receive or send deadline expired, on both
+    targets, or a Linux connect deadline (0.9.1, ADR 0002).
+  - **`TAAR_ERR_INTR` (-4):** a signal interrupted a receive. This happens on
     Linux only; the AGNOS waits are polls and never return it.
   - **anything else `< 0`:** an error whose value is target-specific. Linux
     returns a negative errno; AGNOS mostly returns -1. Do not branch on these
@@ -73,7 +73,7 @@ clause, and a change to the contract supersedes this ADR rather than editing it.
   - **AGNOS:** UDP listener ids 0–7, and TCP fds 64–71 from taar's own table.
 
   Pass an fd only to its own family's calls: `taar_udp_*` for UDP, and
-  `taar_tcp_*` / `taar_sock_close` for TCP.
+  `taar_tcp_*` / `taar_tcp_close` for TCP.
   - An fd taar has closed is an error on both targets.
   - Any other value is outside the contract. AGNOS refuses it, since it checks
     every fd against its tables; Linux acts on whatever kernel fd the value
@@ -89,34 +89,33 @@ clause, and a change to the contract supersedes this ADR rather than editing it.
 
 | Call | Returns | Notes |
 |---|---|---|
-| `ipv4_parse(s)` | the packed address `(a<<24)\|(b<<16)\|(c<<8)\|d`, or `IPV4_PARSE_FAIL` (-1) | Strict dotted quad: four decimal octets 0–255, no leading zero (`0` is an octet; `00` and `010` are not), and no surrounding text. Pure. |
-| `ipv4_format_to_buf(addr, buf)` | the text length | `buf` must hold 16 bytes. Writes the text and a NUL. Pure. |
-| `taar_fill_sockaddr(sa, addr, port)` | 0 | Writes a 16-byte `sockaddr_in`. Pure. |
+| `taar_ipv4_parse(s)` | the packed address `(a<<24)\|(b<<16)\|(c<<8)\|d`, or `TAAR_IPV4_PARSE_FAIL` (-1) | Strict dotted quad: four decimal octets 0–255, no leading zero (`0` is an octet; `00` and `010` are not), and no surrounding text. Pure. |
+| `taar_ipv4_format_to_buf(addr, buf)` | the text length | `buf` must hold 16 bytes. Writes the text and a NUL. Pure. |
 | `taar_udp_open()` | fd, or `< 0` | Close it with `taar_udp_close`. |
 | `taar_udp_set_timeout_ms(fd, ms)` | 0, or `< 0` | Refuses a negative `ms` and a bad fd. |
 | `taar_udp_send(fd, addr, port, p, n)` | `n`, or `< 0` | Records the peer. AGNOS returns `n`, not the kernel's frame length. |
-| `taar_udp_recv(fd, buf, max)` | bytes `> 0`, `_TAAR_ERR_TIMEOUT`, `_TAAR_ERR_INTR` (Linux), or `< 0` | Returns only datagrams from the peer of this socket's last send. A longer datagram is cut to `max`. `max` must be `> 0`. |
+| `taar_udp_recv(fd, buf, max)` | bytes `> 0`, `TAAR_ERR_TIMEOUT`, `TAAR_ERR_INTR` (Linux), or `< 0` | Returns only datagrams from the peer of this socket's last send. A longer datagram is cut to `max`. `max` must be `> 0`. |
 | `taar_udp_close(fd)` | 0, or `< 0` | AGNOS also refuses a listener that taar did not open. |
 | `taar_tcp_open()` | fd, or `< 0` | AGNOS refuses a ninth open socket. |
 | `taar_tcp_set_timeout_ms(fd, ms)` | 0, or `< 0` | As for UDP. Set it before connecting, so the connect is bound where the target can bind it. |
-| `taar_tcp_connect(fd, addr, port)` | 0, or `< 0` | A second connect on a connected socket is an error (Linux: -EISCONN). |
-| `taar_tcp_send(fd, buf, n)` | bytes `> 0` (possibly fewer than `n`, so loop), `0` for `n == 0` on a live connection, `_TAAR_ERR_TIMEOUT` when nothing could be sent by the deadline, or `< 0` | Never raises SIGPIPE. A peer that has gone is `< 0` (Linux: -EPIPE, even for an empty send). |
-| `taar_tcp_recv(fd, buf, max)` | bytes `> 0`, `0` (the peer closed, or `max == 0`), `_TAAR_ERR_TIMEOUT`, `_TAAR_ERR_INTR` (Linux), or `< 0` | `0` never means "timed out" or "no connection". |
-| `taar_sock_close(fd)` | 0, or `< 0` | A second close is an error. |
+| `taar_tcp_connect(fd, addr, port)` | 0, `TAAR_ERR_TIMEOUT` (Linux: the deadline passed), or `< 0` | A second connect on a connected socket is an error (Linux: -EISCONN). |
+| `taar_tcp_send(fd, buf, n)` | bytes `> 0` (possibly fewer than `n`, so loop), `0` for `n == 0` on a live connection, `TAAR_ERR_TIMEOUT` when nothing could be sent by the deadline, or `< 0` | Never raises SIGPIPE. A peer that has gone is `< 0` (Linux: -EPIPE, even for an empty send). |
+| `taar_tcp_recv(fd, buf, max)` | bytes `> 0`, `0` (the peer closed, or `max == 0`), `TAAR_ERR_TIMEOUT`, `TAAR_ERR_INTR` (Linux), or `< 0` | `0` never means "timed out" or "no connection". |
+| `taar_tcp_close(fd)` | 0, or `< 0` | A second close is an error. |
 | `taar_resolve_ipv4(host)` | the packed address (`0` is 0.0.0.0, so test `< 0`), or -1 | A literal returns at once. Otherwise up to three nameservers, `options timeout:` / `attempts:`, NXDOMAIN final, the reply-acceptance and owner-name rules, and the TCP retry on TC. The rules are `src/dns.cyr`'s and identical on both targets; only discovery differs (below). |
 
 ### Where the targets differ
 
 | Area | Linux | AGNOS | Standing |
 |---|---|---|---|
-| Connect deadline | bound by the socket's timeout (`SO_SNDTIMEO`); expiry is -EINPROGRESS | the kernel's ~8 s, whatever was set | Open. agnos 1.57.18 has `SC_TIMED`; this waits on cyrius's `sys_sock_connect` peer (cyrius issue 2026-11-08). |
+| Connect deadline | bound by the socket's timeout (`SO_SNDTIMEO`); expiry is `TAAR_ERR_TIMEOUT` | the kernel's ~8 s, whatever was set | Open. agnos 1.57.18 has `SC_TIMED`; this waits on cyrius's `sys_sock_connect` peer (cyrius issue 2026-11-08). |
 | Reset vs clean close | reset is -ECONNRESET | both read as `0` | Open. Waits on cyrius's epoll peer (issue 2026-11-04) and on agnos freeing epoll instances (agnos issue 2026-11-09). |
 | Unread UDP datagrams | queued, up to `SO_RCVBUF` | one per listener; a later arrival overwrites it | Open. agnos issue 2026-11-09. Costs a slow or failed resolve, never a wrong answer. |
 | Largest UDP datagram | 64 KB (the buffer bounds the read) | 1016 bytes (the kernel's cap) | Accepted. DNS without EDNS stays under 512 bytes. |
 | UDP receive before any send | the socket has no local port yet | bound at open, so any sender is accepted | Unspecified: send first. |
 | Default timeout | none | 10 s | Unspecified (see Rules). |
 | Resolver discovery | `/etc/resolv.conf`; nothing configured → 127.0.0.1 | the DHCP-leased resolver, then resolv.conf; nothing → 8.8.8.8 | By design (0.8.2): AGNOS runs no local resolver. |
-| `_TAAR_ERR_INTR` | possible from a receive | never | By design. The resolver retries it. |
+| `TAAR_ERR_INTR` | possible from a receive | never | By design. The resolver retries it. |
 | Send deadline on an old kernel | — | before agnos 1.57.13 (no `sock_send_dl#109`): the kernel's ~8 s | Documented. Run once by hand against 1.57.12. |
 | Limits | `RLIMIT_NOFILE` | 8 TCP and 8 UDP sockets | Accepted (the kernel's tables). |
 

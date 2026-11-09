@@ -14,7 +14,7 @@ fn main() {
     var ip = taar_resolve_ipv4("example.com");
     if (ip < 0) { return 1; }
     var b = alloc(16);
-    var n = ipv4_format_to_buf(ip, b);
+    var n = taar_ipv4_format_to_buf(ip, b);
     store8(b + n, 10);             # newline
     sys_write(1, b, n + 1);        # write(stdout, ip\n) — arch-dispatched
     return 0;
