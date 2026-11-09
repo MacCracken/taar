@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-09
+
+Answer validation. `taar_resolve_ipv4` now takes an address only for the name
+it asked, or for the end of that name's CNAME chain. Before, it took the first
+class-IN A record in the answer section, whatever name it belonged to.
+
+### Security
+
+- **Answer owner-name validation.** An A record counts only when its owner is
+  the question's name, or the current end of the CNAME chain from it.
+  - **Order:** answers are read in order, as glibc reads them. A class-IN
+    CNAME from the current name moves it to the CNAME's target, so an alias's
+    A counts only after the CNAME that introduces it. Once the question has
+    been aliased, its own A record no longer counts (RFC 1034 §3.6.2).
+  - **Case:** owners compare without case (RFC 4343), with only A–Z folded.
+  - **Broken CNAMEs:** a CNAME whose target cannot be read, or runs past its
+    rdlength, refuses the whole reply.
+
+  Before this, a resolver that answered with records for other names
+  (broken, hostile, or serving a polluted cache) decided where taar
+  connected. glibc checks owners; musl does not.
+- **The reply's OPCODE must be QUERY.** A STATUS or NOTIFY message with the
+  right ID and question is no longer read as an answer.
+
+### Added
+
+- **`_taar_dns_name_eq`** compares two wire names in a message without regard
+  to case. It follows compression pointers on both sides under
+  `_taar_dns_skip_name`'s rules: backward only, in bounds, and within the hop
+  budget, so a hostile message cannot loop it.
+- **`_taar_dns_hdr_opcode`** reads the reply's OPCODE, and
+  **`_TAAR_DNS_TYPE_CNAME`** names the CNAME record type.
+
+### Changed
+
+- The `dns_first_a` bench row (a CNAME then an A) went from 95 to 307 ns,
+  because every record's owner is now compared. That is still nanoseconds
+  against milliseconds of network.
+
+### Tests
+
+- **Unit suite: 168 → 198**, with a small reply builder in the tests.
+  - A new `dns-owner` group covers: a pointer, literal or differently-cased
+    owner; another name's A record before the real one, or alone; names that
+    only share a prefix or suffix; one- and two-hop CNAME chains; a chain
+    that does not start at the question; the question's own A after its
+    CNAME; an out-of-order chain; a looping owner; a CNAME target that cannot
+    be read or overruns its rdata.
+  - A new `dns-name-eq` group covers: case folding of A–Z only; pointers;
+    suffixes; looping, forward, cut and reserved-prefix names.
+  - `dns-reply-ok` gains the OPCODE check.
+- **`resolver.sh`: 15 → 18 checks.** End to end: another name's A is skipped,
+  a reply with only another name's A is a final "no answer", and a CNAME
+  chain is followed. `fake_dns.py` gains `other_first`, `other_only` and
+  `cname` modes.
+- **Mutation: 14 mutations, 12 red.** The two green are commented in-source:
+  - the "unreadable CNAME target" refusal is redundant in effect, because the
+    name comparison refuses a malformed name anyway;
+  - the label-content bounds in the name comparison can't change the result,
+    but keep its reads inside the message.
+
+  The pointer-bounds check first came out green, and a test now catches it: a
+  pointer cut off by the message end, whose missing byte would point back at
+  a good name.
+- **The AGNOS harness passes all 86 checks** with the new answer rules.
+
 ## [0.8.0] - 2026-11-09
 
 Stub-resolver failover. `taar_resolve_ipv4` now handles a nameserver that is

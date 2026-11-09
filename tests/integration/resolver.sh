@@ -148,5 +148,16 @@ expect "a stop/continue mid-wait does not end the resolve (EINTR)" "$WORK/eintr"
 run "$WORK/eintr_tcp" "nameserver $NS1\noptions attempts:1\n" stopcont "$NS1:tc_slow"
 expect "... nor one during the TCP retry's read" "$WORK/eintr_tcp" "10.11.12.13" "$NS1" 1
 
+# Answer validation (0.8.1): only records for the name asked, or its CNAME
+# chain, are an answer.
+run "$WORK/other_first" "nameserver $NS1\n" - "$NS1:other_first"
+expect "an A for another name before the real one is skipped" "$WORK/other_first" "$A" "$NS1" 1
+
+run "$WORK/other_only" "nameserver $NS1\nnameserver $NS2\n" - "$NS1:other_only" "$NS2:full"
+expect "only an A for another name: no answer, and final" "$WORK/other_only" "" "$NS1" 1 "$NS2" 0
+
+run "$WORK/cname" "nameserver $NS1\n" - "$NS1:cname"
+expect "a CNAME chain is followed to its A" "$WORK/cname" "$A" "$NS1" 1
+
 [ $fail -eq 0 ] && echo "all cases passed" || echo "FAILURES"
 exit $fail

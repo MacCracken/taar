@@ -49,6 +49,14 @@ Modes (argv[1]):
              TCP listener                               -> this server said
                                                           nothing usable: client
                                                           must ask the next one
+  other_first  an A for another name (SPOOF_IP), then
+             the real one                               -> client must skip the
+                                                          stranger: UDP_IP
+  other_only   only an A for another name               -> no answer for the
+                                                          question: client fails
+  cname      a CNAME from the question to an alias,
+             then the alias's A                         -> client follows the
+                                                          chain: UDP_IP
   bylabel    every mode above but tc_blackhole at once: each query's first
              label names its mode ("tc_huge.taar.test" behaves as tc_huge).
              One TCP listener serves them all, so the no-listener modes
@@ -97,6 +105,9 @@ MODES = {
     "slow":         dict(tc=False, keep=True,  tcp="none", delay=SLOW_S),
     "tc_slow":      dict(tc=True,  keep=False, tcp="serve", tcp_delay=SLOW_S),
     "tc_empty":     dict(tc=True,  keep=False, tcp="none"),
+    "other_first":  dict(tc=False, keep=False, tcp="none", answers="other_first"),
+    "other_only":   dict(tc=False, keep=False, tcp="none", answers="other_only"),
+    "cname":        dict(tc=False, keep=False, tcp="none", answers="cname"),
 }
 
 MODE = sys.argv[1]
@@ -123,6 +134,31 @@ def build(qid, question, ip, tc, keep, rcode=0):
         body += b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4)
         body += bytes(int(o) for o in ip.split("."))
     return hdr + body
+
+
+def encode(name):
+    return b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
+
+
+def rr(owner, rtype, rdata):
+    return owner + struct.pack("!HHIH", rtype, 1, 60, len(rdata)) + rdata
+
+
+def build_answers(qid, question, kind):
+    """A NOERROR reply whose answer section exercises the owner-name rules."""
+    q_ptr = b"\xc0\x0c"
+    a = lambda ip: bytes(int(o) for o in ip.split("."))
+    other = rr(encode("evil.taar.test"), 1, a(SPOOF_IP))
+    if kind == "other_first":
+        records = [other, rr(q_ptr, 1, a(UDP_IP))]
+    elif kind == "other_only":
+        records = [other]
+    else:                                             # cname
+        alias_off = 12 + len(question) + 2 + 10       # the CNAME's rdata
+        records = [rr(q_ptr, 5, encode("alias.taar.test")),
+                   rr(struct.pack("!H", 0xC000 | alias_off), 1, a(UDP_IP))]
+    hdr = struct.pack("!HHHHHH", qid, 0x8180, 1, len(records), 0, 0)
+    return hdr + question + b"".join(records)
 
 
 def parse(msg):
@@ -161,6 +197,9 @@ def serve_udp():
             s.sendto(build(qid, q, UDP_IP, False, False, rcode=5), addr)   # REFUSED
             continue
         if b.get("silent"):
+            continue
+        if b.get("answers"):
+            s.sendto(build_answers(qid, q, b["answers"]), addr)
             continue
         if b.get("rcode"):
             s.sendto(build(qid, q, UDP_IP, False, False, rcode=b["rcode"]), addr)

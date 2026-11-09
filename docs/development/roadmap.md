@@ -62,12 +62,10 @@ already ships, and two agnos issues (epoll lifetime, UDP queueing).
 `taar_resolve_ipv4` against what glibc and musl stubs do. All of these are
 testable on Linux with the unit suite and `tests/integration/` (0.8.0 added
 `resolver.sh`, with several fake nameservers per case). 0.8.0 shipped
-nameserver failover with `options timeout:` / `attempts:`, and the EINTR retry.
-
-- **Answer owner-name validation (next: 0.8.1).** `_taar_dns_first_a` takes the
-  first class-IN A record without checking its owner against the QNAME or the
-  CNAME chain (or the reply's OPCODE). glibc checks; musl does not. Matters only
-  against a broken or hostile configured resolver. *Ready.*
+nameserver failover with `options timeout:` / `attempts:` and the EINTR retry;
+0.8.1, answer owner-name validation along the CNAME chain and the OPCODE check.
+What is left here is a deadline that waits on a clock, three behaviour
+decisions, and two low-value or trigger-gated items.
 - **A total resolve deadline.** Waits are bounded per call today, and 0.8.0's
   failover multiplies them: per server, 8 UDP receives × the timeout, then a
   TCP retry of 16 reads × the timeout plus its connect, for each of up to three
@@ -139,13 +137,14 @@ Grown only when the named trigger fires.
 
 Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
 
-- **Bump to 0.8.0** — matters to `whirl`, the one consumer of `socket` and
+- **Bump to 0.8.1** — matters to `whirl`, the one consumer of `socket` and
   `dns`. On AGNOS its sends become bounded by the 10 s deadline it already
   sets (they were not — its 1000-try loop on a 0 return could wait hours), a
   recv with no connection is an error rather than a clean close (0.7.0), and
   its resolve no longer shares socket state with its HTTP connection (0.7.1).
   On both targets its lookups fail over across resolv.conf's nameservers and
-  survive a signal (0.8.0). `yo` and `dig` use only `ipv4`, which is unchanged.
+  survive a signal (0.8.0), and only take an address for the host asked or its
+  CNAME chain (0.8.1). `yo` and `dig` use only `ipv4`, which is unchanged.
 - **`dig` onto taar's `socket` and `dns`.** The `socket` fold trigger fired at
   dig 0.3.7, when dig wrote its own connect-then-write UDP transport — the same
   RFC 5452 reasoning as `taar_udp_send`, rediscovered. The fold runs the other

@@ -290,6 +290,10 @@ fn test_dns_reply_ok() {
     assert_eq(_taar_dns_reply_ok(q, ql, r, rl, 0x1234), 0, "altered question refused");
     store8(r + 13, 101);
     assert_eq(_taar_dns_reply_ok(q, ql, r, rl, 0x1234), 1, "restored reply accepted");
+    # OPCODE must be QUERY (0): a STATUS or NOTIFY "reply" is not an answer.
+    _taar_dns_store_u16(r, 2, 0x9180);            # QR | opcode 2 (STATUS) | RD RA
+    assert_eq(_taar_dns_reply_ok(q, ql, r, rl, 0x1234), 0, "non-QUERY opcode refused");
+    _taar_dns_store_u16(r, 2, 0x8180);
     # TC is NOT an acceptance failure — it triggers the TCP retry instead.
     _taar_dns_store_u16(r, 2, 0x8380);
     assert_eq(_taar_dns_hdr_tc(r), 1, "TC bit read back");
@@ -547,6 +551,212 @@ fn test_dns_answer_class() {
     return 0;
 }
 
+# --- a reply builder for the owner-name tests ---
+
+# Start a NOERROR reply to `qname` in `buf` (512 bytes, zeroed): id 0x1234,
+# one question at offset 12, no answers yet. Returns the offset past the question.
+fn _t_msg(buf, qname): i64 {
+    var i = 0;
+    while (i < 512) { store8(buf + i, 0); i = i + 1; }
+    _taar_dns_store_u16(buf, 0, 0x1234);
+    _taar_dns_store_u16(buf, 2, 0x8180);
+    _taar_dns_store_u16(buf, 4, 1);
+    var off = 12 + _taar_dns_encode_name(qname, buf + 12);
+    _taar_dns_store_u16(buf, off, _TAAR_DNS_TYPE_A);
+    _taar_dns_store_u16(buf, off + 2, _TAAR_DNS_CLASS_IN);
+    return off + 4;
+}
+
+# Append an answer's fixed part after an owner already written at `off`: type
+# `t`, class IN, ttl 60, rdlength `rdlen`. Bumps ANCOUNT. Returns the rdata offset.
+fn _t_rr(buf, off, t, rdlen): i64 {
+    _taar_dns_store_u16(buf, off, t);
+    _taar_dns_store_u16(buf, off + 2, _TAAR_DNS_CLASS_IN);
+    _taar_dns_store_u16(buf, off + 4, 0);
+    _taar_dns_store_u16(buf, off + 6, 60);
+    _taar_dns_store_u16(buf, off + 8, rdlen);
+    _taar_dns_store_u16(buf, 6, _taar_dns_hdr_ancount(buf) + 1);
+    return off + 10;
+}
+
+# Write a compression pointer to `target` at `off`. Returns off + 2.
+fn _t_ptr(buf, off, target): i64 {
+    store8(buf + off, 0xC0 | (target >> 8));
+    store8(buf + off + 1, target & 0xFF);
+    return off + 2;
+}
+
+# Append an A record for the name at `owner` (a pointer) -> 10.0.0.x. Returns the end.
+fn _t_a(buf, off, owner, x): i64 {
+    var rd = _t_rr(buf, _t_ptr(buf, off, owner), _TAAR_DNS_TYPE_A, 4);
+    store8(buf + rd, 10); store8(buf + rd + 1, 0); store8(buf + rd + 2, 0); store8(buf + rd + 3, x);
+    return rd + 4;
+}
+
+# Append an A record whose owner is the literal name `owner` -> 10.0.0.x. Returns the end.
+fn _t_a_lit(buf, off, owner, x): i64 {
+    var o = off + _taar_dns_encode_name(owner, buf + off);
+    var rd = _t_rr(buf, o, _TAAR_DNS_TYPE_A, 4);
+    store8(buf + rd, 10); store8(buf + rd + 1, 0); store8(buf + rd + 2, 0); store8(buf + rd + 3, x);
+    return rd + 4;
+}
+
+# Append a CNAME from the name at `owner` (a pointer) to the literal name
+# `target`. The target's offset is the returned end minus its encoded length;
+# _t_cname_at returns it directly. Returns the end.
+var _t_last_cname = 0;
+fn _t_cname(buf, off, owner, target): i64 {
+    var tmp[300];
+    var n = _taar_dns_encode_name(target, &tmp);
+    var rd = _t_rr(buf, _t_ptr(buf, off, owner), _TAAR_DNS_TYPE_CNAME, n);
+    var i = 0;
+    while (i < n) { store8(buf + rd + i, load8(&tmp + i)); i = i + 1; }
+    _t_last_cname = rd;
+    return rd + n;
+}
+
+# === dns: an answer counts only for the name asked, or its CNAME chain ===
+fn test_dns_owner() {
+    test_group("dns-owner");
+    var b = alloc(512);
+    var q = 12;                                   # the question's name
+    var e = _t_msg(b, "example.com");
+    e = _t_a(b, e, q, 1);
+    assert_eq(_taar_dns_first_a(b, e), 0x0A000001, "A for the question (pointer owner)");
+    e = _t_msg(b, "example.com");
+    e = _t_a_lit(b, e, "example.com", 2);
+    assert_eq(_taar_dns_first_a(b, e), 0x0A000002, "A for the question (literal owner)");
+    e = _t_msg(b, "example.com");
+    e = _t_a_lit(b, e, "EXAMPLE.Com", 3);
+    assert_eq(_taar_dns_first_a(b, e), 0x0A000003, "owner compared without case (RFC 4343)");
+
+    # Records for some other name are not the answer, wherever they sit.
+    e = _t_msg(b, "example.com");
+    e = _t_a_lit(b, e, "evil.test", 66);
+    e = _t_a(b, e, q, 4);
+    assert_eq(_taar_dns_first_a(b, e), 0x0A000004, "an A for another name first is skipped");
+    e = _t_msg(b, "example.com");
+    e = _t_a_lit(b, e, "evil.test", 66);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "an A for another name alone is no answer");
+    e = _t_msg(b, "example.com");
+    e = _t_a_lit(b, e, "example.co", 66);
+    e = _t_a_lit(b, e, "a.example.com", 67);
+    e = _t_a_lit(b, e, "example.com.evil", 68);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "names sharing a prefix or suffix are other names");
+
+    # The CNAME chain from the question is followed, in order, as glibc does.
+    e = _t_msg(b, "example.com");
+    e = _t_cname(b, e, q, "alias.test");
+    e = _t_a(b, e, _t_last_cname, 5);
+    assert_eq(_taar_dns_first_a(b, e), 0x0A000005, "CNAME, then A for its target");
+    e = _t_msg(b, "example.com");
+    e = _t_cname(b, e, q, "one.test");
+    e = _t_cname(b, e, _t_last_cname, "two.test");
+    e = _t_a(b, e, _t_last_cname, 6);
+    assert_eq(_taar_dns_first_a(b, e), 0x0A000006, "two-hop CNAME chain");
+    e = _t_msg(b, "example.com");
+    e = _t_cname(b, e, q, "alias.test");
+    e = _t_a(b, e, q, 7);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "after a CNAME the question's own A is not the answer");
+    e = _t_msg(b, "example.com");
+    e = _t_a_lit(b, e, "evil.test", 66);
+    var evil = e - 4 - 10 - 11;                   # "evil.test" encodes to 11 bytes
+    e = _t_cname(b, e, evil, "x.test");
+    e = _t_a(b, e, _t_last_cname, 66);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "a chain that does not start at the question is ignored");
+    # An A for the alias placed before the CNAME that introduces it: glibc reads
+    # answers in order and does not take it either.
+    e = _t_msg(b, "example.com");
+    var a_at = e;
+    e = _t_a_lit(b, e, "alias.test", 8);
+    e = _t_ptr(b, e, q);
+    e = _t_rr(b, e, _TAAR_DNS_TYPE_CNAME, 2);
+    e = _t_ptr(b, e, a_at);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "an out-of-order chain is not followed");
+
+    # Hostile names.
+    e = _t_msg(b, "example.com");
+    var loop = e;
+    store8(b + e, 1); store8(b + e + 1, 97);      # "a" then a pointer back to itself
+    e = _t_ptr(b, e + 2, loop);
+    e = _t_rr(b, e, _TAAR_DNS_TYPE_A, 4);
+    e = e + 4;
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "an owner name that loops is refused, not followed forever");
+    e = _t_msg(b, "example.com");
+    e = _t_ptr(b, e, q);
+    var rd = _t_rr(b, e, _TAAR_DNS_TYPE_CNAME, 2);
+    e = _t_ptr(b, rd, rd);                        # the CNAME target points at itself
+    e = _t_a(b, e, q, 9);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "a CNAME whose target cannot be read refuses the reply");
+    # A CNAME whose target name runs past its rdlength: rdata is the label "x"
+    # (2 bytes), and the name only ends at the next record's first byte. Read
+    # through, it is the name "x." — which the third record's owner matches.
+    e = _t_msg(b, "example.com");
+    e = _t_ptr(b, e, q);
+    rd = _t_rr(b, e, _TAAR_DNS_TYPE_CNAME, 2);
+    store8(b + rd, 1); store8(b + rd + 1, 120);   # label "x", no terminator
+    e = rd + 2;
+    store8(b + e, 0);                             # next record: owner "." ...
+    e = _t_rr(b, e + 1, _TAAR_DNS_TYPE_A, 4) + 4; # ... an A for it
+    e = _t_a_lit(b, e, "x", 9);
+    assert_eq(_taar_dns_first_a(b, e), 0 - 1, "a CNAME target longer than its rdata refuses the reply");
+    return 0;
+}
+
+# === dns: the name comparison itself ===
+fn test_dns_name_eq() {
+    test_group("dns-name-eq");
+    var b = alloc(512);
+    var e = _t_msg(b, "Example.COM");
+    var lit = e;
+    e = e + _taar_dns_encode_name("example.com", b + e);
+    var ptr = e;
+    e = _t_ptr(b, e, 12);
+    var other = e;
+    e = e + _taar_dns_encode_name("example.org", b + e);
+    assert_eq(_taar_dns_name_eq(b, e, 12, 12), 1, "a name equals itself");
+    assert_eq(_taar_dns_name_eq(b, e, 12, lit), 1, "equal ignoring case");
+    assert_eq(_taar_dns_name_eq(b, e, ptr, lit), 1, "a pointer equals the name it points at");
+    assert_eq(_taar_dns_name_eq(b, e, lit, other), 0, "a different last label");
+    assert_eq(_taar_dns_name_eq(b, e, lit, lit + 8), 0, "a name and its own suffix differ");
+    # Only ASCII letters fold: '[' (0x5B) is not '{' (0x7B).
+    var x = alloc(64);
+    var i = 0;
+    while (i < 64) { store8(x + i, 0); i = i + 1; }
+    store8(x + 12, 1); store8(x + 13, 0x5B);
+    store8(x + 15, 1); store8(x + 16, 0x7B);
+    assert_eq(_taar_dns_name_eq(x, 64, 12, 15), 0, "only A-Z fold to a-z");
+    store8(x + 16, 0x5B);
+    assert_eq(_taar_dns_name_eq(x, 64, 12, 15), 1, "the same byte matches");
+    assert_eq(_taar_dns_name_eq(x, 15, 12, 15), 0, "a name past the end is malformed");
+    # A label then a pointer back to it: both sides loop. The hop budget ends it.
+    store8(x + 20, 1); store8(x + 21, 97);
+    store8(x + 22, 0xC0); store8(x + 23, 20);
+    assert_eq(_taar_dns_name_eq(x, 64, 20, 20), 0, "a looping name is malformed, not compared forever");
+    assert_eq(_taar_dns_name_eq(x, 64, 20, 12), 0, "... against any other name too");
+    # A forward pointer is refused even where its target is a good name: at 30,
+    # a pointer to the name at 40 ("a."); compared with that name itself.
+    store8(x + 30, 0xC0); store8(x + 31, 40);
+    store8(x + 40, 1); store8(x + 41, 97); store8(x + 42, 0);
+    assert_eq(_taar_dns_name_eq(x, 64, 40, 40), 1, "(the target name is good)");
+    assert_eq(_taar_dns_name_eq(x, 64, 30, 40), 0, "a forward pointer is refused");
+    # A pointer whose second byte lies past the message end is cut, even when
+    # the byte that follows in memory would make it point back at a good name.
+    # The pointer is the message's last word, back to "a." at 40.
+    store8(x + 50, 0xC0); store8(x + 51, 40);
+    assert_eq(_taar_dns_name_eq(x, 52, 50, 40), 1, "(a whole pointer to the name is fine)");
+    assert_eq(_taar_dns_name_eq(x, 51, 50, 40), 0, "a pointer cut by the message end is malformed");
+    # 0x40 / 0x80 are reserved label prefixes, not lengths. The buffer is big
+    # enough that reading 0x40 as the length 64 would stay in bounds, so only
+    # the prefix check can refuse it (as in test_dns_hostile).
+    var big = alloc(256);
+    i = 0;
+    while (i < 256) { store8(big + i, 0); i = i + 1; }
+    store8(big + 12, 0x40);
+    assert_eq(_taar_dns_name_eq(big, 256, 12, 12), 0, "a reserved label prefix is malformed");
+    return 0;
+}
+
 # === dns: the TCP read loop is bounded in passes, not just bytes ===
 #
 # SOCK_SEQPACKET keeps message boundaries, so each read returns one record —
@@ -665,6 +875,8 @@ fn main() {
     test_resolv_conf();
     test_dns_encode_bounds();
     test_dns_answer_class();
+    test_dns_owner();
+    test_dns_name_eq();
     test_dns_tcp_read_cap();
     test_socket_send_timeout();
     test_poll_deadline();

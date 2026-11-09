@@ -11,6 +11,7 @@
 # Requires earlier in the bundle: src/ipv4.cyr, src/socket.cyr.
 
 var _TAAR_DNS_TYPE_A        = 1;
+var _TAAR_DNS_TYPE_CNAME    = 5;
 var _TAAR_DNS_CLASS_IN      = 1;
 var _TAAR_DNS_FLAG_RD       = 0x0100;
 var _TAAR_DNS_HEADER_LEN    = 12;
@@ -88,6 +89,8 @@ fn _taar_dns_hdr_qr(msg): i64      { return (load8(msg + 2) >> 7) & 1; }
 # record that did fit is still authoritative-as-sent — and taar_resolve_ipv4
 # retries over TCP-53 for the complete answer (since 0.4.0).
 fn _taar_dns_hdr_tc(msg): i64      { return (load8(msg + 2) >> 1) & 1; }
+# OPCODE, flags bits 14..11: 0 = QUERY, the only kind taar sends.
+fn _taar_dns_hdr_opcode(msg): i64  { return (load8(msg + 2) >> 3) & 0x0F; }
 
 # Encode "example.com" → wire labels at `out`. Returns bytes written, or 0.
 fn _taar_dns_encode_name(name, out): i64 {
@@ -185,6 +188,63 @@ fn _taar_dns_skip_name(msg, msg_len, off): i64 {
     return 0;
 }
 
+# Follow compression pointers from `off` to the next label byte, under
+# _taar_dns_skip_name's rules: a pointer must point backward and in bounds, and
+# `hops` (a counter the caller keeps per name, at `hops_ptr`) may not exceed
+# _TAAR_DNS_MAX_HOPS. Returns that label's offset, or -1 if the name is malformed.
+fn _taar_dns_label_at(msg, msg_len, off, hops_ptr): i64 {
+    while (1) {
+        if (off >= msg_len) { return 0 - 1; }
+        var b = load8(msg + off);
+        if ((b & 0xC0) != 0xC0) { return off; }
+        if (off + 1 >= msg_len) { return 0 - 1; }
+        var ptr = ((b & 0x3F) << 8) | load8(msg + off + 1);
+        var hops = load64(hops_ptr) + 1;
+        store64(hops_ptr, hops);
+        if (hops > _TAAR_DNS_MAX_HOPS) { return 0 - 1; }
+        if (ptr >= off) { return 0 - 1; }
+        off = ptr;
+    }
+    return 0 - 1;
+}
+
+# Do the wire names at offsets `a` and `b` of `msg` spell the same name?
+# Letters compare without case (RFC 4343: "Example.COM" is "example.com"),
+# and only A-Z fold. Both sides follow compression pointers under the same
+# backward-only rule and hop budget as _taar_dns_skip_name, so a hostile message
+# cannot loop it. 1 = the same name; 0 = different, or either is malformed.
+fn _taar_dns_name_eq(msg, msg_len, a, b): i64 {
+    var ha = 0;
+    var hb = 0;
+    while (1) {
+        a = _taar_dns_label_at(msg, msg_len, a, &ha);
+        if (a < 0) { return 0; }
+        b = _taar_dns_label_at(msg, msg_len, b, &hb);
+        if (b < 0) { return 0; }
+        var la = load8(msg + a);
+        if (la != load8(msg + b)) { return 0; }
+        if (la == 0) { return 1; }
+        if (la > _TAAR_DNS_MAX_LABEL) { return 0; }
+        # Not observable in the result — a label that overruns msg_len always
+        # fails at its next label_at — but these keep every read below inside
+        # msg_len rather than up to 63 bytes past it.
+        if (a + 1 + la > msg_len) { return 0; }
+        if (b + 1 + la > msg_len) { return 0; }
+        var i = 1;
+        while (i <= la) {
+            var ca = load8(msg + a + i);
+            var cb = load8(msg + b + i);
+            if (ca >= 65) { if (ca <= 90) { ca = ca + 32; } }
+            if (cb >= 65) { if (cb <= 90) { cb = cb + 32; } }
+            if (ca != cb) { return 0; }
+            i = i + 1;
+        }
+        a = a + 1 + la;
+        b = b + 1 + la;
+    }
+    return 0;
+}
+
 # Offset of the answer section (past the question(s)), or 0.
 fn _taar_dns_answer_start(msg, msg_len): i64 {
     if (msg_len < _TAAR_DNS_HEADER_LEN) { return 0; }
@@ -201,14 +261,27 @@ fn _taar_dns_answer_start(msg, msg_len): i64 {
     return off;
 }
 
-# First A-record IPv4 (packed first-octet-high-byte) in the answer section, or -1.
-# Only class-IN records count: an A record of another class (CH, HS) is not an
-# Internet address, whatever its four bytes say. The owner name is NOT checked
-# against the question or its CNAME chain — taar trusts its configured
-# resolver's answer section (roadmap: owner-name validation).
+# The address the answer section gives for the question, or -1: the first
+# class-IN A record (rdlength 4) whose owner is the name asked, or the end of
+# the CNAME chain from it. Answers are read in order, as glibc reads them: a
+# class-IN CNAME whose owner is the current name moves the name to its target,
+# so an A for an alias counts only after the CNAME that introduces it, and the
+# question's own A no longer counts once it has been aliased (RFC 1034 §3.6.2:
+# a name with a CNAME has no other data).
+#
+# Owners compare without case (_taar_dns_name_eq). The question sits at offset
+# 12 and is the one we asked: _taar_dns_reply_ok has already checked the echo.
+# A CNAME whose target cannot be read, or runs past its rdlength, refuses the
+# whole reply: a broken answer section is not trusted for any of its records.
+#
+# Until 0.8.1 the owner was not checked at all, and the first class-IN A record
+# was taken whatever name it was for — so a resolver answering with records for
+# other names (broken, or hostile, or a cache polluted by one) decided where
+# taar connected. glibc checks the owner; musl does not.
 fn _taar_dns_first_a(msg, msg_len): i64 {
     var off = _taar_dns_answer_start(msg, msg_len);
     if (off == 0) { return 0 - 1; }
+    var name = _TAAR_DNS_HEADER_LEN;                 # the question's name
     var an = _taar_dns_hdr_ancount(msg);
     var i = 0;
     while (i < an) {
@@ -220,14 +293,26 @@ fn _taar_dns_first_a(msg, msg_len): i64 {
         var rdlen = _taar_dns_load_u16(msg, p + 8);
         var rdata = p + 10;
         if (rdata + rdlen > msg_len) { return 0 - 1; }
-        if (rtype == _TAAR_DNS_TYPE_A) {
-            if (rclass == _TAAR_DNS_CLASS_IN) {
-                if (rdlen == 4) {
-                    var o0 = load8(msg + rdata);
-                    var o1 = load8(msg + rdata + 1);
-                    var o2 = load8(msg + rdata + 2);
-                    var o3 = load8(msg + rdata + 3);
-                    return (o0 << 24) | (o1 << 16) | (o2 << 8) | o3;
+        if (rclass == _TAAR_DNS_CLASS_IN) {
+            if (_taar_dns_name_eq(msg, msg_len, off, name) == 1) {
+                if (rtype == _TAAR_DNS_TYPE_A) {
+                    if (rdlen == 4) {
+                        var o0 = load8(msg + rdata);
+                        var o1 = load8(msg + rdata + 1);
+                        var o2 = load8(msg + rdata + 2);
+                        var o3 = load8(msg + rdata + 3);
+                        return (o0 << 24) | (o1 << 16) | (o2 << 8) | o3;
+                    }
+                }
+                if (rtype == _TAAR_DNS_TYPE_CNAME) {
+                    var t = _taar_dns_skip_name(msg, msg_len, rdata);
+                    # Redundant in effect: an unreadable target would never
+                    # match an owner anyway (_taar_dns_name_eq refuses a
+                    # malformed name), so removing this leaves the result -1.
+                    # Kept so a broken reply is refused here, not by accident.
+                    if (t == 0) { return 0 - 1; }
+                    if (t > rdata + rdlen) { return 0 - 1; }
+                    name = rdata;
                 }
             }
         }
@@ -593,6 +678,7 @@ fn _taar_dns_reply_ok(qbuf, qlen, buf, len, id): i64 {
     # the reads above it in-bounds rather than merely harmless.
     if (len < _TAAR_DNS_HEADER_LEN) { return 0; }
     if (_taar_dns_hdr_qr(buf) != 1) { return 0; }
+    if (_taar_dns_hdr_opcode(buf) != 0) { return 0; }
     if (_taar_dns_hdr_id(buf) != id) { return 0; }
     if (_taar_dns_hdr_qdcount(buf) != 1) { return 0; }
     if (_taar_dns_same_question(qbuf, qlen, buf, len) != 1) { return 0; }

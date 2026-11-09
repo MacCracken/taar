@@ -8,10 +8,10 @@
 
 ## Version
 
-**0.8.0** — 2026-11-09. Last P(-1) review (0.6.2):
+**0.8.1** — 2026-11-09. Last P(-1) review (0.6.2):
 [`docs/audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
 
-`dist/taar.cyr` is 1468 lines (`wc -l`; `cyrius distlib` reports 1451, excluding
+`dist/taar.cyr` is 1554 lines (`wc -l`; `cyrius distlib` reports 1537, excluding
 its 17-line generated header and `# Requires` block — the two numbers are the
 same bundle).
 
@@ -44,7 +44,7 @@ same bundle).
 |--------|---------|-------|
 | `ipv4` | `ipv4_parse`, `ipv4_format_to_buf` | 0.1.0 |
 | `socket` | `taar_udp_open/send/recv/set_timeout_ms/close`, `taar_tcp_open/connect/send/recv/set_timeout_ms`, `taar_sock_close`, `taar_fill_sockaddr` | 0.2.0 (Linux); AGNOS backend 0.3.0; arch-dispatched syscalls 0.3.3; recv-timeout parity 0.5.0; TCP timeout bounds connect + send, AGNOS reply-source filter 0.6.2; AGNOS executed, send deadline + no-connection errors 0.7.0; per-socket AGNOS state, fd validation 0.7.1 |
-| `dns` | `taar_resolve_ipv4` — resolver discovery, RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC | 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0; fail-closed resolver choice 0.6.2; nameserver failover, `options timeout:` / `attempts:`, EINTR retry 0.8.0 |
+| `dns` | `taar_resolve_ipv4` — resolver discovery, RFC 1035 A-record query/parse over UDP-53, TCP-53 retry on TC | 0.2.0; AGNOS kernel-leased resolver 0.3.1; reply-acceptance hardening 0.3.3; TCP fallback 0.4.0; fail-closed resolver choice 0.6.2; nameserver failover, `options timeout:` / `attempts:`, EINTR retry 0.8.0; answer owner-name + CNAME-chain validation, OPCODE check 0.8.1 |
 
 Planned modules and their triggers live in [`roadmap.md`](roadmap.md).
 
@@ -78,9 +78,9 @@ What is actually gated, and what is not.
   `programs/`, `tests/` (including `tests/agnos/`) and `benches/`. Lint and doc
   coverage are hard gates in the `build` job over the same files; `audit` alone
   only reports them.
-- **x86_64**: smoke round-trip; unit suite **168 passed / 0 failed** (22
+- **x86_64**: smoke round-trip; unit suite **198 passed / 0 failed** (24
   groups).
-- **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 168
+- **aarch64** (`qemu-aarch64`, `unit` + smoke *executed*, not just built) — 198
   passed / 0 failed. This leg exists because the 0.3.3 `sendto` defect built
   clean and only failed at runtime.
 - **Integration, Linux** (`tests/integration/tc_fallback.sh`): seven cases —
@@ -91,14 +91,16 @@ What is actually gated, and what is not.
   the checkout and runs each case under a 30 s timeout, as PID 1 of its own PID
   namespace. The job relaxes Ubuntu's AppArmor user-namespace restriction, then
   probes and warns-and-skips where namespaces are still forbidden.
-- **Resolver, Linux** (`tests/integration/resolver.sh`, same job): 15 checks,
+- **Resolver, Linux** (`tests/integration/resolver.sh`, same job): 18 checks,
   each case with its own bind-mounted resolv.conf and one or more fake
   nameservers that log every query they receive — failover from an
   unreachable, silent, SERVFAIL, REFUSED, unroutable or truncated-and-empty
   server; NXDOMAIN final (the next server is never asked); `options attempts:`
   rounds and the default 2; every round asking every server; the
-  three-nameserver limit; a fresh query ID per query; and a stop/continue
-  mid-wait (EINTR) surviving on both the UDP and the TCP read.
+  three-nameserver limit; a fresh query ID per query; a stop/continue
+  mid-wait (EINTR) surviving on both the UDP and the TCP read; and the answer
+  rules end to end — an A for another name skipped (and final when it is the
+  only one), a CNAME chain followed.
 - **AGNOS, executed** (`tests/agnos/run.sh`, the `agnos` job): boots agnos
   1.57.19 with the gnoboot 0.9.0 loader under QEMU + OVMF — both release
   binaries checked against SHA-256s pinned in `tests/agnos/pins.sh` — with
@@ -152,7 +154,11 @@ use", so nothing changes. Removing the bound outright is red. The 0.8.0
 resolver guards — the options clamps and number parse, the three-server bound,
 the whole-word keyword, which answers are final and which hand over, the fresh
 query ID, the attempts loop, the EINTR retries — were checked against the unit
-suite and `resolver.sh`: 18 mutations, all red.
+suite and `resolver.sh`: 18 mutations, all red. 0.8.1's answer rules: 14
+mutations (the owner check, CNAME following, the CNAME rdata bound, OPCODE,
+class, case folding and its range, label-length compare, the name comparison's
+hop budget, backward rule, reserved-prefix and pointer-bounds checks), 12 red;
+the other two are in the list below.
 The Linux forged-reply case was checked the same way (unconnected `sendto`
 accepts the forgery). The exceptions are all commented in-source:
 - the `ptr >= msg_len` check in `_taar_dns_skip_name` (redundant given the
@@ -165,7 +171,13 @@ accepts the forgery). The exceptions are all commented in-source:
 - the DNS retry's `_TAAR_DNS_TCP_MAX_SPINS` cap (since 0.7.0 neither backend
   returns 0 for a non-empty send with a deadline set, so nothing reaches it);
 - the AGNOS `taar_tcp_send` no-connection guard (redundant: the kernel refuses
-  conn -1 itself — the one green mutation above).
+  conn -1 itself — the one green mutation above);
+- `_taar_dns_first_a`'s "unreadable CNAME target" refusal (redundant in effect:
+  such a target never matches an owner, because `_taar_dns_name_eq` refuses a
+  malformed name);
+- `_taar_dns_name_eq`'s label-content bounds (not observable in the result — an
+  overrunning label always fails at its next label — but they keep its reads
+  inside the message).
 
 ## Carry-forward
 
