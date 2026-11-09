@@ -13,7 +13,7 @@ the tools that consume it sit in the English-wordplay lane.
 
 ## Status
 
-**v0.8.1.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
+**v0.9.0.** taar opened at the extraction trigger — `yo` (ping/ICMP) and
 `dig` (DNS) shipped with a byte-identical `ipv4.cyr`, and that duplication is
 the signal to extract — then grows per-protocol as each consumer folds in.
 All three consumers are on `[deps.taar]` today; `whirl` (HTTP/S) drove the
@@ -59,7 +59,7 @@ git+tag once published):
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.8.1"
+tag = "0.9.0"
 modules = ["dist/taar.cyr"]
 ```
 
@@ -81,7 +81,7 @@ Requires the cyrius toolchain pinned in `cyrius.cyml` (`6.7.18`); run
 
 ```sh
 cyrius audit                                        # fmt + lint + docs + tests + bench
-cyrius test tests/                                  # tests/taar.tcyr — 198 assertions
+cyrius test tests/                                  # tests/taar.tcyr — 210 assertions
 cyrius test --aarch64 tests/                        # same suite on aarch64 (needs qemu-user)
 cyrius bench benches/                               # codec / parser timings
 cyrius build programs/smoke.cyr build/taar-smoke    # compiles + round-trips an address
@@ -135,6 +135,9 @@ tests/agnos/run.sh
   by release (0.7.x – 1.0.0) and the trigger each backlog module waits on.
 - [`docs/audit/`](docs/audit/) — dated P(-1) review reports; the latest is
   [2026-11-08](docs/audit/2026-11-08-audit.md).
+- [`docs/adr/`](docs/adr/) — decision records. [0001](docs/adr/0001-one-socket-and-resolver-contract.md)
+  is the contract both backends keep: what every call returns, how timeouts,
+  fds and errors behave, and where Linux and AGNOS still differ.
 - [`CLAUDE.md`](CLAUDE.md) — durable conventions and the work loop.
 
 ## License

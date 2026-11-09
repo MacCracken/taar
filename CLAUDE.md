@@ -36,6 +36,11 @@ address codecs, socket I/O, packet construction, and DNS.
 
 ## Conventions
 
+- **The backend contract is ADR 0001** (`docs/adr/0001-one-socket-and-resolver-contract.md`):
+  what every public call returns, how timeouts, fds and errors behave, and where
+  the Linux and AGNOS arms still differ. A change to any of that changes the ADR
+  and its test in the same release; closing a target difference updates its
+  row. A caller may branch only on the error values it names.
 - Address packing mirrors `agnos/kernel/core/net.cyr` `ip4()` —
   `(a<<24)|(b<<16)|(c<<8)|d` — so addresses are byte-comparable with kernel
   struct fields and feed the AGNOS `sock_connect` / `udp_send` syscalls directly.
@@ -108,6 +113,9 @@ durable one and delete the copy.
 Plus dated P(-1) review reports, `docs/audit/<date>-audit.md`: findings,
 method and evidence for one review, immutable once filed. CHANGELOG links to
 the report rather than repeating it.
+
+Plus ADRs, `docs/adr/NNNN-*.md`: why a decision was made, one decision each,
+superseded by a new ADR rather than rewritten (`docs/adr/README.md`).
 
 ## DO NOT
 

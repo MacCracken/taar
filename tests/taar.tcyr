@@ -33,13 +33,14 @@ fn test_ipv4_parse() {
     assert_eq(ipv4_parse("0x7f.0.0.1"), IPV4_PARSE_FAIL, "ipv4 hex rejected");
     assert_eq(ipv4_parse(".1.2.3"),     IPV4_PARSE_FAIL, "ipv4 leading dot");
     assert_eq(ipv4_parse("1.2.3.4."),   IPV4_PARSE_FAIL, "ipv4 trailing dot");
-    # Leading zeros are ACCEPTED and read as decimal: "010" is 10, not octal 8.
-    # inet_aton(3) would read 8, so a consumer that validates a string here and
-    # then re-parses it with libc gets a different address. taar's callers use
-    # the packed return value, not the string, so this is pinned rather than
-    # changed — see docs/development/state.md carry-forward.
-    assert_eq(ipv4_parse("010.1.1.1"),  0x0A010101, "ipv4 leading zero = decimal");
-    assert_eq(ipv4_parse("00.0.0.0"),   0x00000000, "ipv4 double zero accepted");
+    # Leading zeros are refused (0.8.2): inet_aton(3) reads "010" as octal 8
+    # and a decimal reader as 10, so the string is ambiguous. A lone "0" is an
+    # octet; any longer octet may not start with one.
+    assert_eq(ipv4_parse("010.1.1.1"),  IPV4_PARSE_FAIL, "ipv4 leading zero refused");
+    assert_eq(ipv4_parse("1.2.3.04"),   IPV4_PARSE_FAIL, "... in any octet");
+    assert_eq(ipv4_parse("00.0.0.0"),   IPV4_PARSE_FAIL, "ipv4 double zero refused");
+    assert_eq(ipv4_parse("0.0.0.0"),    0x00000000, "a lone 0 is an octet");
+    assert_eq(ipv4_parse("10.0.100.200"), 0x0A0064C8, "zeros after the first digit are fine");
     return 0;
 }
 
@@ -159,6 +160,23 @@ fn test_dns_reply_match() {
     assert_eq(_taar_dns_same_question(q, ql, r, rl), 0, "altered qname refused");
     store8(r + 13, 101);                      # restore
     assert_eq(_taar_dns_same_question(q, ql, r, rl), 1, "restored qname matches");
+    # The name compares without case; only A-Z fold.
+    store8(r + 13, 69);                       # 'e' -> 'E'
+    store8(r + 21, 67);                       # 'c' of "com" -> 'C'
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 1, "echo in another case accepted");
+    store8(r + 13, 101); store8(r + 21, 99);
+    # Only A-Z fold: '{' (0x7B) is not '[' (0x5B), though they too are 32 apart.
+    store8(q + 13, 0x7B); store8(r + 13, 0x5B);
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 0, "only letters fold");
+    store8(q + 13, 101); store8(r + 13, 101);
+    # QTYPE / QCLASS must match exactly (the last four bytes of the question).
+    store8(r + ql - 3, 0x41);                 # QTYPE 0x0041, not A
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 0, "QTYPE altered refused");
+    # Were the whole question folded, a QTYPE byte 0x41 ('A') would match 0x61.
+    store8(q + ql - 3, 0x41); store8(r + ql - 3, 0x61);
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 0, "QTYPE never folds");
+    store8(q + ql - 3, 1); store8(r + ql - 3, 1);
+    assert_eq(_taar_dns_same_question(q, ql, r, rl), 1, "restored question matches");
     # Too short to even contain the question we asked.
     assert_eq(_taar_dns_same_question(q, ql, r, 20), 0, "runt reply refused");
     return 0;
@@ -407,9 +425,11 @@ fn test_resolv_choose() {
     var n = _t_put(b, "nameserver 192.168.1.1\n");
     assert_eq(_t_choose(0x0A000001, b, n, 512), 0x0A000001, "kernel-leased server wins");
     assert_eq(_t_choose(0, b, n, 512), 0xC0A80101, "file server used");
-    assert_eq(_t_choose(0, b, 0 - 2, 512), _TAAR_RESOLV_FALLBACK, "no file: public fallback");
+    assert_eq(_taar_plat_dns_fallback(), 0x7F000001, "Linux fallback is 127.0.0.1, as glibc and musl");
+    assert_eq(_t_choose(0, b, 0 - 2, 512), _taar_plat_dns_fallback(), "no file: the fallback");
+    assert_eq(_t_choose(0, b, 0 - 13, 512), _taar_plat_dns_fallback(), "unreadable file (EACCES): the fallback");
     n = _t_put(b, "search lan\n");
-    assert_eq(_t_choose(0, b, n, 512), _TAAR_RESOLV_FALLBACK, "no nameserver: public fallback");
+    assert_eq(_t_choose(0, b, n, 512), _taar_plat_dns_fallback(), "no nameserver: the fallback");
     # A host whose resolv.conf names only IPv6 resolvers has a DNS config taar
     # cannot use. Sending its lookups to 8.8.8.8 instead would bypass the
     # resolver the host chose (VPN, split-horizon, filtering) and disclose every
@@ -483,7 +503,7 @@ fn test_resolv_conf() {
     # The fallback keeps the file's options; a kernel lease takes the defaults.
     n = _t_put(b, "options timeout:3\n");
     assert_eq(_taar_resolv_choose(0, b, n, 512, c), 1, "no nameserver: one fallback server");
-    assert_eq(load64(c), _TAAR_RESOLV_FALLBACK, "... the public fallback");
+    assert_eq(load64(c), _taar_plat_dns_fallback(), "... the fallback");
     assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 3000, "... paced by the file's options");
     assert_eq(_taar_resolv_choose(0x0A000001, b, n, 512, c), 1, "kernel lease: one server");
     assert_eq(load64(c + _TAAR_RESOLV_CFG_TIMEOUT), 5000, "... with the default timeout");
@@ -819,6 +839,15 @@ fn test_socket_send_timeout() {
     assert_eq(n, _TAAR_ERR_TIMEOUT, "a send into a full buffer returns at the deadline");
     sys_close(a);
     sys_close(c);
+    # A send to a peer that has gone is an error, not a signal. Under write(2)
+    # SIGPIPE would end this whole test process here, before the assert.
+    store64(&fds, 0);
+    sys_socketpair(1, 1, 0, &fds);
+    a = load32(&fds);
+    assert_eq(taar_tcp_send(a, "x", 0), 0, "an empty send on a live connection is 0");
+    sys_close(load32(&fds + 4));
+    assert_eq(taar_tcp_send(a, "x", 1), 0 - 32, "a send to a closed peer is -EPIPE, not SIGPIPE");
+    sys_close(a);
     return 0;
 }
 

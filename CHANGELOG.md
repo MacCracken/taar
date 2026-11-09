@@ -4,6 +4,115 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-09
+
+The backend contract, written down. Writing it found a Linux defect, fixed
+here too.
+
+### Added
+
+- **ADR 0001, the contract both backends keep**
+  (`docs/adr/0001-one-socket-and-resolver-contract.md`).
+  - **Shared rules:**
+    - a caller may branch only on `_TAAR_ERR_TIMEOUT` and `_TAAR_ERR_INTR`;
+      every other negative value is target-specific;
+    - each socket has its own timeout, where 0 means no deadline and a
+      negative value is refused, and the default is not part of the contract;
+    - fds are opaque and belong to their own family's calls;
+    - no call raises a signal;
+    - taar is not thread-safe;
+    - a resolve leaves the caller's sockets alone.
+  - **A per-call table** of return values and notes.
+  - **A table of where the targets still differ**, each row with its standing
+    and what it waits on: the connect deadline, reset vs EOF, UDP queueing,
+    the largest datagram, the default timeout, the resolver fallback, EINTR,
+    and limits.
+  - **How each clause is enforced**, plus the alternatives rejected: a POSIX
+    shim on AGNOS, per-target contracts, specified errno values, and a
+    specified default timeout.
+- **`docs/adr/`**, with an index and the template shared with yo and dig.
+  `CLAUDE.md` records ADR 0001 as the contract and the convention that a
+  change to the contract changes the ADR and its test in the same release.
+
+### Fixed
+
+- **On Linux, a send to a peer that has gone no longer kills the process.**
+  `taar_tcp_send` was `write(2)`, which raises SIGPIPE when the peer has gone,
+  and SIGPIPE's default action ends the process: measured exit 141, before
+  the call returned. It is now `sendto(…, MSG_NOSIGNAL)`, which returns
+  -EPIPE instead.
+  - **Who it hit:** whirl does not ignore SIGPIPE, so a plain-HTTP upload to a
+    server that reset mid-send ended whirl silently.
+  - **AGNOS** has no SIGPIPE and already returned -1.
+  - **Unchanged:** SO_SNDTIMEO still bounds the call, and still reports
+    `_TAAR_ERR_TIMEOUT`.
+
+### Tests
+
+- **Unit suite: 208 → 210.** `socket-send-timeout` checks that a send to a
+  closed peer is -EPIPE, which only passes if the process survives the call,
+  and that an empty send on a live connection is 0.
+  - Mutation: reverting to `write(2)` kills the test binary with signal 13.
+  - On Linux, an empty send on a broken connection is -EPIPE too, so the ADR
+    says "0 on a live connection".
+
+## [0.8.2] - 2026-11-09
+
+Three behaviour decisions the roadmap had held open, settled. Each changes what
+a caller sees.
+
+### Changed
+
+- **No resolver configured → 127.0.0.1 on Linux.** When
+  `/etc/resolv.conf` is missing, unreadable (EACCES counts) or names no
+  nameserver, taar now asks 127.0.0.1, as glibc and musl do. It used to send
+  every hostname to Google's 8.8.8.8, a third party the host never chose.
+  AGNOS, which runs no local resolver, keeps 8.8.8.8 behind its DHCP-leased
+  resolver.
+  - The fallback is now a per-target helper, `_taar_plat_dns_fallback`, in
+    `socket.cyr`, the one module with per-target arms. `dns.cyr` loses the
+    `_TAAR_RESOLV_FALLBACK` constant.
+  - A file naming only resolvers taar can't use still fails closed (0.6.2).
+- **The question echo compares without case.** taar requires a reply to echo
+  the question it asked, and that comparison was byte for byte. So a resolver
+  that echoes "Example.COM" as "example.com" made every such lookup fail.
+  - The name now compares the way 0.8.1's owner check does (RFC 4343, A–Z
+    only).
+  - QTYPE and QCLASS still match exactly.
+  - This was chosen over randomising the query's letter case (DNS 0x20). A
+    stub gains little from 0x20's extra bits, on top of its 16-bit ID, random
+    source port and source filter, and it fails every lookup through a
+    resolver that rewrites case.
+- **`ipv4_parse` refuses leading zeros.** A multi-digit octet may not start
+  with 0, so `010.1.1.1` and `00.0.0.0` are refused, while `0.0.0.0` is
+  still accepted.
+  - **Why:** the string was ambiguous. inet_aton(3) reads `010` as octal 8,
+    and taar read it as decimal 10. This matches glibc's inet_pton, Go 1.17+
+    and Python 3.9.5+ (CVE-2021-29921).
+  - **Consumer impact:** yo and dig parse user-typed addresses with it, and
+    dig also parses its resolv.conf with it. Neither tool's tests relied on
+    the old reading.
+  - **Resolver impact:** `taar_resolve_ipv4("010.1.1.1")` is no longer a
+    literal, so it goes to DNS as a name.
+
+### Tests
+
+- **Unit suite: 198 → 208.**
+  - Leading zeros in any octet, with a lone `0` still accepted.
+  - The Linux fallback is 127.0.0.1, for a missing file and an unreadable one.
+  - The echo in another case is accepted. Only letters fold, so `{` is not
+    `[`. QTYPE never folds.
+- **`resolver.sh`: 18 → 20 checks.**
+  - With no resolv.conf at all (an empty tmpfs over `/etc`), 127.0.0.1 is
+    asked.
+  - A question echoed in upper case is accepted. `fake_dns.py` gains an
+    `upper_echo` mode.
+- **AGNOS harness: 86 → 87 checks.** AGNOS's fallback is pinned at 8.8.8.8.
+- **Mutation: 6 mutations, 5 red.**
+  - The green one raised the question-length floor from 12 to 16 bytes. No
+    query is that short, and neither compare loop needs it, so the floor is
+    back at 12 instead of shipping as an untested guard.
+
 ## [0.8.1] - 2026-11-09
 
 Answer validation. `taar_resolve_ipv4` now takes an address only for the name

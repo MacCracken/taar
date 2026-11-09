@@ -118,6 +118,9 @@ fn ag_lease() {
     _ag_eq(_taar_resolv_discover(&cfg), 1, "lease: discovery takes the kernel lease alone");
     _ag_eq(load64(&cfg), _AG_DNS, "lease: ... and it is the user-net DNS forwarder");
     _ag_eq(load64(&cfg + _TAAR_RESOLV_CFG_ATTEMPTS), 2, "lease: ... with the default attempts");
+    # With no lease and no resolv.conf, AGNOS falls back to 8.8.8.8: it runs no
+    # local resolver, so Linux's 127.0.0.1 would answer nothing here.
+    _ag_eq(_taar_plat_dns_fallback(), ipv4_parse("8.8.8.8"), "lease: the AGNOS fallback stays 8.8.8.8");
     return 0;
 }
 

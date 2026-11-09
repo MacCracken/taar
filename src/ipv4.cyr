@@ -15,8 +15,15 @@
 # separate concern (taar/src/dns.cyr, folds in when a consumer needs it).
 #
 # Strict grammar: D '.' D '.' D '.' D '\0'  where D = one to three
-# decimal digits, value in [0, 255]. No empty segments. No leading
+# decimal digits, value in [0, 255], with no leading zero ("0" is an
+# octet, "00" and "010" are not). No empty segments. No leading
 # garbage. No trailing garbage. No spaces.
+#
+# Leading zeros are refused because they are ambiguous: inet_aton(3)
+# reads "010" as octal 8, while a decimal reader says 10, so the same
+# string named two different hosts depending on which parser saw it.
+# glibc's inet_pton, Go (1.17) and Python (3.9.5, CVE-2021-29921) all
+# refuse them; through 0.8.1 taar read them as decimal.
 
 var IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
 
@@ -32,6 +39,7 @@ fn ipv4_parse(s): i64 {
         var oct = 0;
         var digits = 0;
         var c = load8(s + i);
+        var lead = c;                                  # the octet's first digit
         while (c >= 48) {
             if (c > 57) { break; }
             oct = oct * 10 + (c - 48);
@@ -42,6 +50,9 @@ fn ipv4_parse(s): i64 {
             c = load8(s + i);
         }
         if (digits == 0) { return IPV4_PARSE_FAIL; }
+        if (digits > 1) {
+            if (lead == 48) { return IPV4_PARSE_FAIL; }    # a leading '0'
+        }
         packed = (packed << 8) | oct;
         if (seg < 3) {
             if (c != 46) { return IPV4_PARSE_FAIL; }   # '.' = 46

@@ -63,9 +63,10 @@ already ships, and two agnos issues (epoll lifetime, UDP queueing).
 testable on Linux with the unit suite and `tests/integration/` (0.8.0 added
 `resolver.sh`, with several fake nameservers per case). 0.8.0 shipped
 nameserver failover with `options timeout:` / `attempts:` and the EINTR retry;
-0.8.1, answer owner-name validation along the CNAME chain and the OPCODE check.
-What is left here is a deadline that waits on a clock, three behaviour
-decisions, and two low-value or trigger-gated items.
+0.8.1, answer owner-name validation along the CNAME chain and the OPCODE check;
+0.8.2, the three behaviour decisions (127.0.0.1 when nothing is configured, a
+case-insensitive question echo, leading zeros refused). What is left here is a
+deadline that waits on a clock, and two low-value or trigger-gated items.
 - **A total resolve deadline.** Waits are bounded per call today, and 0.8.0's
   failover multiplies them: per server, 8 UDP receives × the timeout, then a
   TCP retry of 16 reads × the timeout plus its connect, for each of up to three
@@ -75,16 +76,6 @@ decisions, and two low-value or trigger-gated items.
   monotonic clock, which only `chrono` provides on Linux — and `yo` / `dig` do
   not carry it, so taar cannot depend on it (CLAUDE.md). *Waits on:* a clock in
   the `syscalls` leaf upstream, or every consumer carrying `chrono`.
-- **Decision: the fallback when resolv.conf is missing or unreadable.** taar
-  uses 8.8.8.8 (deliberate for AGNOS, where a kernel lease is tried first); glibc
-  and musl use 127.0.0.1 on Linux. 0.6.2 already fails closed when the file names
-  resolvers taar cannot use. Includes whether EACCES should count as "missing".
-  *Waits on:* the decision — it changes behaviour on minimal containers.
-- **Decision: query-name case.** Either randomise the QNAME's letter case
-  (DNS 0x20) for extra anti-spoofing entropy — taar already requires an exact
-  echo, so it would be enforced — or compare the echo case-insensitively for
-  resolvers that canonicalise case. Not both. *Waits on:* research into which
-  resolvers in the consumers' deployments preserve case.
 - **Detect oversize datagrams.** A UDP reply over 2 KB is cut silently (no
   `MSG_TRUNC`) and parsed as if whole. Memory-safe; compliant servers stay under
   512 bytes because taar sends no EDNS OPT. *Ready, low value.*
@@ -93,21 +84,18 @@ decisions, and two low-value or trigger-gated items.
   musl try short names against the search list. *Waits on:* a consumer that
   resolves short names (none does: whirl takes hosts from URLs, dig is
   explicit).
-- **Decision: `ipv4_parse` leading zeros.** `010.1.1.1` parses as decimal
-  10.1.1.1 where `inet_aton(3)` reads octal 8.1.1.1. Harmless while callers use
-  the packed value; a caller that validates a string here and re-parses it with
-  libc gets a different address. Pinned by test so a change is deliberate.
-  *Waits on:* the decision.
-
 ## 0.9.x — surface freeze
 
-- **An ADR for the module / backend contract.** What every `taar_*` function
-  promises on both targets (returns, timeouts, the 0-means-closed rule), and
-  where the targets still differ (the 0.7.x items above), so the AGNOS work has
-  a written contract to test against. *Ready.*
-- **Public-surface review.** Settle names and return contracts before 1.0;
-  deprecate anything not wanted. *Waits on:* 0.7.x and 0.8.x, whose fixes touch
-  the surface.
+0.9.0 wrote the contract: [ADR 0001](../adr/0001-one-socket-and-resolver-contract.md).
+Its "where the targets differ" table is the 0.7.x list above, kept in step.
+
+- **Public-surface review.** Read ADR 0001's per-call table and settle names
+  before 1.0: whether the `taar_` prefix covers `ipv4_*` and `IPV4_PARSE_FAIL`
+  too, whether `taar_sock_close` becomes `taar_tcp_close` to match
+  `taar_udp_close`, and whether the internal `_taar_*` names a test or harness
+  reaches into should be public. Deprecate rather than remove, since three
+  consumers pin the bundle. *Ready* — 0.8.x is done, and the 0.7.x rows wait on
+  upstream changes that do not touch names.
 
 ## 1.0.0 — criteria
 
@@ -137,14 +125,20 @@ Grown only when the named trigger fires.
 
 Consumer-repo work, handled there; listed so taar's 1.0 criteria are visible.
 
-- **Bump to 0.8.1** — matters to `whirl`, the one consumer of `socket` and
-  `dns`. On AGNOS its sends become bounded by the 10 s deadline it already
+- **Bump to 0.9.0** — matters to all three. `yo` and `dig` parse user-typed
+  addresses (and dig its resolv.conf) with `ipv4_parse`, which since 0.8.2
+  refuses a leading zero: `010.1.1.1` is no longer read as 10.1.1.1. Neither
+  tool's tests rely on the old reading. And to `whirl`, the one consumer of
+  `socket` and `dns`. On AGNOS its sends become bounded by the 10 s deadline it already
   sets (they were not — its 1000-try loop on a 0 return could wait hours), a
   recv with no connection is an error rather than a clean close (0.7.0), and
   its resolve no longer shares socket state with its HTTP connection (0.7.1).
   On both targets its lookups fail over across resolv.conf's nameservers and
   survive a signal (0.8.0), and only take an address for the host asked or its
-  CNAME chain (0.8.1). `yo` and `dig` use only `ipv4`, which is unchanged.
+  CNAME chain (0.8.1); with no resolver configured on Linux it asks 127.0.0.1
+  rather than 8.8.8.8, and a resolver that echoes the name in another case
+  works (0.8.2). On Linux a send to a server that has gone no longer kills it
+  with SIGPIPE (0.9.0).
 - **`dig` onto taar's `socket` and `dns`.** The `socket` fold trigger fired at
   dig 0.3.7, when dig wrote its own connect-then-write UDP transport — the same
   RFC 5452 reasoning as `taar_udp_send`, rediscovered. The fold runs the other

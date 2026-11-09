@@ -53,6 +53,7 @@ var _TAAR_IPPROTO_UDP = 17;
 var _TAAR_SOL_SOCKET  = 1;
 var _TAAR_SO_RCVTIMEO = 20;   # asm-generic, so x86_64 and aarch64 agree
 var _TAAR_SO_SNDTIMEO = 21;
+var _TAAR_MSG_NOSIGNAL = 0x4000;   # asm-generic, so x86_64 and aarch64 agree
 
 # Receive-deadline expiry, returned by both recv paths on both backends.
 # -11 is Linux's -EAGAIN, which is literally what a SO_RCVTIMEO expiry yields
@@ -231,10 +232,16 @@ fn taar_tcp_connect(fd, packed_addr, port): i64 {
     return sys_connect(fd, &sa, 16);
 }
 
-# write(2). Returns bytes accepted, which may be < len on a partial write —
-# the caller loops. (Unchanged contract; noted because it is easy to miss.)
+# send(2) with MSG_NOSIGNAL. Returns bytes accepted, which may be < len on a
+# partial write — the caller loops — or a negative errno: _TAAR_ERR_TIMEOUT when
+# SO_SNDTIMEO expires with nothing sent, -EPIPE when the peer has gone.
+#
+# Through 0.8.2 this was write(2), and a write to a peer that has gone raises
+# SIGPIPE, whose default action ends the process: the consumer died inside the
+# call instead of getting an error back (measured: exit 141). ADR 0001 says no
+# taar call raises a signal, and AGNOS has no SIGPIPE to raise.
 fn taar_tcp_send(fd, buf, len): i64 {
-    return sys_write(fd, buf, len);
+    return sys_sendto(fd, buf, len, _TAAR_MSG_NOSIGNAL, 0, 0);
 }
 
 # Read from the stream. Returns bytes read (>0), 0 when the peer has closed
@@ -267,6 +274,13 @@ fn _taar_plat_read_file(path, buf, maxlen): i64 {
 # Linux has no kernel-provided resolver to query — DNS discovery uses
 # /etc/resolv.conf. Return 0 so _taar_resolv_discover falls through to the file.
 fn _taar_plat_dns_server(): i64 { return 0; }
+
+# The nameserver when nothing is configured (resolv.conf missing, unreadable,
+# or naming no nameserver): 127.0.0.1, the glibc and musl default, so a lookup
+# never leaves the host unless a local resolver forwards it. Through 0.8.1 this
+# was 8.8.8.8, which sent every hostname to a third party the host had not
+# chosen.
+fn _taar_plat_dns_fallback(): i64 { return 0x7F000001; }
 #endif
 
 #ifdef CYRIUS_TARGET_AGNOS
@@ -648,4 +662,10 @@ fn _taar_plat_read_file(path, buf, maxlen): i64 {
 # wait4(2) on Linux. The #ifdef kept us safe, but a number that means two
 # different things on two kernels does not belong in a source file.
 fn _taar_plat_dns_server(): i64 { return sys_net_dns_server(); }
+
+# The nameserver when nothing is configured: no DHCP lease and no usable
+# resolv.conf. AGNOS runs no local resolver, so libc's 127.0.0.1 would answer
+# nothing; the public 8.8.8.8 is the one server that can. The lease, tried
+# first, is the normal case.
+fn _taar_plat_dns_fallback(): i64 { return 0x08080808; }
 #endif

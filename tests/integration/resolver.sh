@@ -41,7 +41,9 @@ run() {
     timeout "$CASE_TIMEOUT" unshare -rnm --pid --fork --kill-child bash -c '
         set -u
         d="$1"; here="$2"; bin="$3"; sig="$4"; shift 4
-        mount --bind "$d/resolv.conf" /etc/resolv.conf || exit 90
+        if [ "$sig" != noconf ]; then
+            mount --bind "$d/resolv.conf" /etc/resolv.conf || exit 90
+        fi
         ip link set lo up || exit 91
         for s in "$@"; do
             a="${s%%:*}"; m="${s#*:}"
@@ -54,6 +56,12 @@ run() {
             for _ in $(seq 1 50); do [ -s "$d/ready.$a" ] && break; sleep 0.1; done
             [ -s "$d/ready.$a" ] || exit 92
         done
+        if [ "$sig" = noconf ]; then
+            # No resolv.conf at all: an empty /etc over the real one. The
+            # servers are already running and the client is static, so
+            # nothing else here needs /etc.
+            mount -t tmpfs none /etc || exit 93
+        fi
         t0=$(date +%s%N)
         if [ "$sig" = stopcont ]; then
             # Stop the client while it waits on the slow server, then let it
@@ -147,6 +155,13 @@ expect "a stop/continue mid-wait does not end the resolve (EINTR)" "$WORK/eintr"
 # attempts:1, so a lost TCP read cannot be rescued by a second round.
 run "$WORK/eintr_tcp" "nameserver $NS1\noptions attempts:1\n" stopcont "$NS1:tc_slow"
 expect "... nor one during the TCP retry's read" "$WORK/eintr_tcp" "10.11.12.13" "$NS1" 1
+
+# 0.8.2's decisions.
+run "$WORK/noconf" "" noconf "127.0.0.1:full"
+expect "no resolv.conf: 127.0.0.1 is asked, as glibc and musl do" "$WORK/noconf" "$A" "127.0.0.1" 1
+
+run "$WORK/upper" "nameserver $NS1\n" - "$NS1:upper_echo"
+expect "a question echoed in another case is still our question" "$WORK/upper" "$A" "$NS1" 1
 
 # Answer validation (0.8.1): only records for the name asked, or its CNAME
 # chain, are an answer.

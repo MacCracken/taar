@@ -54,6 +54,10 @@ Modes (argv[1]):
                                                           stranger: UDP_IP
   other_only   only an A for another name               -> no answer for the
                                                           question: client fails
+  upper_echo   the answer, with the question echoed in
+             upper case                                 -> client compares the
+                                                          echo without case:
+                                                          UDP_IP
   cname      a CNAME from the question to an alias,
              then the alias's A                         -> client follows the
                                                           chain: UDP_IP
@@ -108,6 +112,7 @@ MODES = {
     "other_first":  dict(tc=False, keep=False, tcp="none", answers="other_first"),
     "other_only":   dict(tc=False, keep=False, tcp="none", answers="other_only"),
     "cname":        dict(tc=False, keep=False, tcp="none", answers="cname"),
+    "upper_echo":   dict(tc=False, keep=True,  tcp="none", upper=True),
 }
 
 MODE = sys.argv[1]
@@ -198,6 +203,11 @@ def serve_udp():
             continue
         if b.get("silent"):
             continue
+        if b.get("upper"):
+            # Upper-case only the name's letters; label lengths and the
+            # trailing QTYPE / QCLASS are left as they were.
+            name, tail = q[:-4], q[-4:]
+            q = bytes(c - 32 if 97 <= c <= 122 else c for c in name) + tail
         if b.get("answers"):
             s.sendto(build_answers(qid, q, b["answers"]), addr)
             continue
